@@ -2,7 +2,16 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-import plugin, { applyTransitions, diffBusy, emptyActivity, filterLog, formatDuration, shortId } from '../desktop/plugin.js'
+import plugin, {
+  anyBusy,
+  applyTransitions,
+  diffBusy,
+  emptyActivity,
+  filterLog,
+  formatDuration,
+  shortId,
+  shouldShowPane
+} from '../desktop/plugin.js'
 import { host } from '@hermes/plugin-sdk'
 
 // ── pure logic ──────────────────────────────────────────────────────────────
@@ -59,28 +68,49 @@ test('filterLog: this chat vs all chats', () => {
 function fakeCtx() {
   const disposers = []
   const contributions = []
+  const timers = new Set()
+  const add = c => {
+    contributions.push(c)
+    return () => {
+      const i = contributions.indexOf(c)
+      if (i >= 0) contributions.splice(i, 1)
+    }
+  }
   return {
     contributions,
+    pane: () => contributions.find(c => c.area === 'panes'),
+    /** Run pending timers (and any they schedule) until none are left. */
+    flushTimers: () => {
+      for (let i = 0; i < 10 && timers.size; i++) [...timers].forEach(t => (timers.delete(t), t()))
+    },
+    /** Run only the timers pending right now (one step of a chain). */
+    stepTimers: () => [...timers].forEach(t => (timers.delete(t), t())),
     dispose: () => disposers.splice(0).forEach(fn => fn()),
-    register: c => (contributions.push(c), () => {}),
-    registerMany: cs => (contributions.push(...cs), () => {}),
+    register: add,
+    registerMany: cs => {
+      const ds = cs.map(add)
+      return () => ds.forEach(d => d())
+    },
     onDispose: fn => disposers.push(fn),
     onEvent: () => () => {},
     setInterval: () => () => {},
-    setTimeout: () => () => {}
+    setTimeout: fn => {
+      timers.add(fn)
+      return () => timers.delete(fn)
+    }
   }
 }
 
-function paneStores(ctx) {
-  const pane = ctx.contributions.find(c => c.area === 'panes')
-  return pane.render().props // { $activity, $events, $bySession, clear }
+/** The shared model every render gets (via the always-present status chip). */
+function modelOf(ctx) {
+  return ctx.contributions.find(c => c.id === 'chip').render().props.model
 }
 
 test('register: tracks turns per session; focus switches are not transitions', () => {
   host.state.busyBySession.set({})
   const ctx = fakeCtx()
   plugin.register(ctx)
-  const { $activity } = paneStores(ctx)
+  const { $activity } = modelOf(ctx)
 
   host.state.busyBySession.set({ a: true }) // turn starts in A
   host.state.focusedSessionId.set('b') // user switches to B: no busy change
@@ -95,19 +125,154 @@ test('register: tracks turns per session; focus switches are not transitions', (
   ctx.dispose()
   host.state.busyBySession.set({ a: true })
   assert.equal($activity.get().log.length, 4, 'no updates after dispose')
+  host.state.busyBySession.set({})
 })
 
 test('register: a turn already running at load is seeded as started', () => {
   host.state.busyBySession.set({ z: true })
   const ctx = fakeCtx()
   plugin.register(ctx)
-  const { $activity, clear } = paneStores(ctx)
+  const { $activity, actions } = modelOf(ctx)
   assert.equal($activity.get().sessions.z.busy, true)
-  clear()
+  assert.ok(ctx.pane(), 'pane shows for an in-flight turn at load')
+  actions.clear()
   assert.equal($activity.get().log.length, 0)
   assert.equal($activity.get().sessions.z.busy, true, 'clear keeps in-flight turns')
   ctx.dispose()
   host.state.busyBySession.set({})
+})
+
+// ── pane visibility ─────────────────────────────────────────────────────────
+
+test('shouldShowPane', () => {
+  assert.equal(shouldShowPane({ anyBusy: false, pinned: false, dismissed: false }), false)
+  assert.equal(shouldShowPane({ anyBusy: true, pinned: false, dismissed: false }), true)
+  assert.equal(shouldShowPane({ anyBusy: true, pinned: false, dismissed: true }), false)
+  assert.equal(shouldShowPane({ anyBusy: false, pinned: true, dismissed: false }), true)
+  assert.equal(anyBusy({ a: false, b: true }), true)
+  assert.equal(anyBusy(undefined), false)
+})
+
+test('pane: absent when idle, appears on work, lingers, animates out, then goes', () => {
+  host.state.busyBySession.set({})
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { $paneOpen, $closing } = modelOf(ctx)
+  assert.equal(ctx.pane(), undefined, 'idle: no pane')
+
+  host.state.busyBySession.set({ a: true })
+  assert.ok(ctx.pane(), 'working: pane registered')
+  assert.equal(ctx.pane().data.height, '50vh')
+  assert.equal($paneOpen.get(), true)
+
+  host.state.busyBySession.set({ a: false })
+  assert.ok(ctx.pane(), 'still there during the grace period')
+  host.state.busyBySession.set({ a: true }) // next turn starts within the grace period
+  ctx.flushTimers()
+  assert.ok(ctx.pane(), 'cancelled hide: no flash between turns')
+
+  host.state.busyBySession.set({ a: false })
+  ctx.stepTimers() // grace period ends → exit animation starts
+  assert.ok(ctx.pane(), 'still registered while animating out')
+  assert.equal($closing.get(), true)
+  ctx.stepTimers() // exit animation ends
+  assert.equal(ctx.pane(), undefined, 'gone after the exit animation')
+  assert.equal($closing.get(), false)
+  assert.equal($paneOpen.get(), false)
+  ctx.dispose()
+})
+
+test('pane: work resuming mid-exit cancels the exit', () => {
+  host.state.busyBySession.set({})
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { $closing } = modelOf(ctx)
+  host.state.busyBySession.set({ a: true })
+  host.state.busyBySession.set({ a: false })
+  ctx.stepTimers() // → closing
+  assert.equal($closing.get(), true)
+  host.state.busyBySession.set({ a: true })
+  assert.equal($closing.get(), false, 'animating back in')
+  ctx.flushTimers()
+  assert.ok(ctx.pane(), 'pane stays')
+  ctx.dispose()
+  host.state.busyBySession.set({})
+})
+
+test('pane: hide during work stays hidden for that spell, returns next task', () => {
+  host.state.busyBySession.set({})
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { actions } = modelOf(ctx)
+
+  host.state.busyBySession.set({ a: true })
+  actions.hidePane()
+  ctx.flushTimers() // exit animation (no grace period for an explicit hide)
+  assert.equal(ctx.pane(), undefined, 'hidden')
+  host.state.busyBySession.set({ a: true, b: true }) // more work in the same spell
+  assert.equal(ctx.pane(), undefined, 'stays hidden')
+
+  host.state.busyBySession.set({})
+  host.state.busyBySession.set({ a: true }) // next task
+  assert.ok(ctx.pane(), 'back for the next task')
+  ctx.dispose()
+  host.state.busyBySession.set({})
+})
+
+test('pane: chip toggle pins it open while idle, debug command opens debug view', () => {
+  host.state.busyBySession.set({})
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { actions, $ui } = modelOf(ctx)
+
+  actions.togglePane()
+  assert.ok(ctx.pane(), 'pinned open while idle')
+  ctx.flushTimers()
+  assert.ok(ctx.pane(), 'pinned pane does not auto-hide')
+  actions.togglePane()
+  ctx.flushTimers()
+  assert.equal(ctx.pane(), undefined, 'toggled closed')
+
+  ctx.contributions.find(c => c.id === 'debug').data.run()
+  assert.ok(ctx.pane())
+  assert.equal($ui.get().view, 'debug')
+  ctx.dispose()
+})
+
+// ── render smoke test ───────────────────────────────────────────────────────
+
+/** Expand every function component (stub hooks are plain values), so a
+ *  missing import or bad prop access throws here rather than in the app. */
+function renderTree(node, seen = []) {
+  if (Array.isArray(node)) return node.forEach(n => renderTree(n, seen))
+  if (!node || typeof node !== 'object') return
+  if (typeof node.type === 'function') {
+    seen.push(node.type.name)
+    return renderTree(node.type(node.props || {}), seen)
+  }
+  if (node.type === undefined) throw new Error('element with undefined type (missing import?)')
+  renderTree(node.props && node.props.children, seen)
+  return seen
+}
+
+test('render: chip and both pane views render without throwing', () => {
+  host.state.busyBySession.set({ a: true })
+  host.state.focusedSessionId.set('a')
+  host.state.busy.set(true)
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { actions } = modelOf(ctx)
+  const seen = []
+  renderTree(ctx.contributions.find(c => c.id === 'chip').render(), seen)
+  renderTree(ctx.pane().render(), seen)
+  actions.setView('debug')
+  renderTree(ctx.pane().render(), seen)
+  for (const name of ['StatusChip', 'Dot', 'StretchPane', 'StretchView', 'DebugView', 'AgentStatus']) {
+    assert.ok(seen.includes(name), `rendered ${name}`)
+  }
+  ctx.dispose()
+  host.state.busyBySession.set({})
+  host.state.busy.set(false)
 })
 
 // ── loader constraints ──────────────────────────────────────────────────────

@@ -16,9 +16,9 @@
  * Pure logic is exported at the top of the file and unit-tested in tests/.
  */
 
-import { host, atom, computed, useValue, STATUSBAR_AREAS, PALETTE_AREA, Button, Tip } from '@hermes/plugin-sdk'
+import { host, atom, computed, useValue, STATUSBAR_AREAS, PALETTE_AREA, Tip } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 export const PLUGIN_ID = 'stretch-break'
 
@@ -26,6 +26,17 @@ const LOG_LIMIT = 40
 const EVENT_LIMIT = 30
 /** High-frequency event types we count but don't list individually. */
 const NOISY_EVENTS = new Set(['message.delta', 'tool.progress'])
+/** Pane height while shown: ~2/3 of the window, leaving the chat (and any
+ *  question the agent asks) visible above. Core panes use vh units too. */
+const PANE_HEIGHT = '50vh'
+/** Grace period after work ends: shows "Hermes finished" briefly (and avoids a
+ *  flash between back-to-back turns) before the pane leaves. */
+export const HIDE_DELAY_MS = 2500
+/** Exit animation length; the pane is unregistered when it completes. */
+export const EXIT_MS = 220
+const ENTER_MS = 280
+const EASE_OUT = 'cubic-bezier(0.2, 0.8, 0.2, 1)'
+const EASE_IN = 'cubic-bezier(0.4, 0, 1, 1)'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure logic (no SDK access) — exported for tests
@@ -93,6 +104,21 @@ export function shortId(id) {
 }
 
 /** Log entries for the pane's scope: 'chat' = focused session only, 'all' = every session. */
+/** True if any session in a busy map is mid-turn. */
+export function anyBusy(map) {
+  return Object.values(map || {}).some(Boolean)
+}
+
+/**
+ * Should the Stretch Break pane exist right now?
+ * - pinned: the user opened it by hand (chip / ⌘K) — shows regardless.
+ * - otherwise it shows while any session is working, unless the user hid it
+ *   during this busy spell (dismissed, reset once everything is idle).
+ */
+export function shouldShowPane({ anyBusy: busy, pinned, dismissed }) {
+  return Boolean(pinned || (busy && !dismissed))
+}
+
 export function filterLog(log, scope, focusedId) {
   return scope === 'all' ? log : log.filter(e => e.sessionId === focusedId)
 }
@@ -148,19 +174,29 @@ function useFocusedStatus($activity) {
   return { busy, focusedId, rec, elapsed }
 }
 
-function StatusChip({ $activity }) {
-  const { busy, elapsed, rec } = useFocusedStatus($activity)
+function StatusChip({ model }) {
+  const { busy, elapsed, rec } = useFocusedStatus(model.$activity)
+  const paneOpen = useValue(model.$paneOpen)
   const label = busy ? `Working${elapsed != null ? ` ${formatDuration(elapsed)}` : ''}` : 'Idle'
-  const tip = busy
+  const status = busy
     ? 'Hermes is working on this chat'
     : rec && rec.lastDurationMs != null
       ? `Idle · last turn took ${formatDuration(rec.lastDurationMs)}`
       : 'Idle'
   return jsx(Tip, {
-    label: tip,
-    children: jsxs('span', {
+    label: `${status} · click to ${paneOpen ? 'hide' : 'show'} Stretch Break`,
+    children: jsxs('button', {
+      type: 'button',
+      onClick: model.actions.togglePane,
+      'aria-pressed': paneOpen,
       className: 'inline-flex h-full items-center gap-1.5 px-1.5 text-[0.6875rem]',
-      style: { color: busy ? 'var(--ui-text-secondary)' : 'var(--ui-text-tertiary)', ...S.mono },
+      style: {
+        ...S.mono,
+        background: 'none',
+        border: 'none',
+        cursor: 'pointer',
+        color: busy || paneOpen ? 'var(--ui-text-secondary)' : 'var(--ui-text-tertiary)'
+      },
       children: [jsx(Dot, { on: busy }), label]
     })
   })
@@ -173,34 +209,40 @@ function Row({ label, value }) {
   })
 }
 
-/** Two-option text toggle (plain button: SegmentedControl's props aren't documented). */
-function ScopeToggle({ scope, setScope }) {
-  const opt = (value, label) =>
-    jsx(
-      'button',
-      {
-        type: 'button',
-        onClick: () => setScope(value),
-        'aria-pressed': scope === value,
-        style: {
-          background: 'none',
-          border: 'none',
-          padding: '0 2px',
-          cursor: 'pointer',
-          font: 'inherit',
-          color: scope === value ? 'var(--ui-text-secondary)' : 'var(--ui-text-quaternary)',
-          textDecoration: scope === value ? 'underline' : 'none',
-          textUnderlineOffset: 3
-        },
-        children: label
-      },
-      value
-    )
-  return jsxs('span', { style: { display: 'inline-flex', gap: 6 }, children: [opt('chat', 'this chat'), opt('all', 'all chats')] })
+/** Plain text button (Button's variant/size props aren't documented). */
+function TextButton({ active = false, onClick, children, title }) {
+  return jsx('button', {
+    type: 'button',
+    onClick,
+    title,
+    'aria-pressed': active,
+    style: {
+      background: 'none',
+      border: 'none',
+      padding: '0 2px',
+      cursor: 'pointer',
+      font: 'inherit',
+      color: active ? 'var(--ui-text-secondary)' : 'var(--ui-text-quaternary)',
+      textDecoration: active ? 'underline' : 'none',
+      textUnderlineOffset: 3
+    },
+    children
+  })
 }
 
-function ActivityPane({ $activity, $events, $bySession, clear }) {
-  const { busy, focusedId, elapsed } = useFocusedStatus($activity)
+/** Inline set of TextButtons acting as a segmented toggle. */
+function TextToggle({ value, onChange, options }) {
+  return jsx('span', {
+    style: { display: 'inline-flex', gap: 6 },
+    children: options.map(([v, label]) =>
+      jsx(TextButton, { active: value === v, onClick: () => onChange(v), children: label }, v)
+    )
+  })
+}
+
+function DebugView({ model }) {
+  const { $activity, $events, $bySession, actions } = model
+  const { focusedId } = useFocusedStatus($activity)
   const [scope, setScope] = useState('chat')
   const awaiting = useValue(host.state.awaitingResponse)
   const gateway = useValue(host.state.gateway)
@@ -208,17 +250,6 @@ function ActivityPane({ $activity, $events, $bySession, clear }) {
   const activity = useValue($activity)
   const events = useValue($events)
   const busyIds = Object.keys(bySession || {}).filter(k => bySession[k])
-
-  const header = jsxs('div', {
-    style: { display: 'flex', alignItems: 'center', gap: 10 },
-    children: [
-      jsx(Dot, { on: busy }),
-      jsx('span', { style: { fontSize: 15, fontWeight: 600 }, children: busy ? 'Working' : 'Idle' }),
-      busy && elapsed != null ? jsx('span', { style: { ...S.mono, ...S.muted }, children: formatDuration(elapsed) }) : null,
-      jsx('span', { style: { flex: 1 } }),
-      jsx(Button, { onClick: clear, children: 'Clear' })
-    ]
-  })
 
   const facts = jsxs('div', {
     style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', columnGap: 24, rowGap: 2 },
@@ -236,7 +267,12 @@ function ActivityPane({ $activity, $events, $bySession, clear }) {
     children: [
       jsxs('div', {
         style: { ...S.muted, marginBottom: 4, display: 'flex', gap: 10 },
-        children: ['Turns (newest first) ·', jsx(ScopeToggle, { scope, setScope })]
+        children: [
+          'Turns (newest first) ·',
+          jsx(TextToggle, { value: scope, onChange: setScope, options: [['chat', 'this chat'], ['all', 'all chats']] }),
+          jsx('span', { style: { flex: 1 } }),
+          jsx(TextButton, { onClick: actions.clear, title: 'Clear the turn log and event counts', children: 'clear' })
+        ]
       }),
       log.length === 0
         ? jsx('div', {
@@ -295,8 +331,85 @@ function ActivityPane({ $activity, $events, $bySession, clear }) {
   })
 
   return jsxs('div', {
-    style: { height: '100%', overflow: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12 },
-    children: [header, facts, turnLog, eventLog]
+    style: { flex: 1, minHeight: 0, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 8 },
+    children: [facts, turnLog, eventLog]
+  })
+}
+
+/** Placeholder for the Stage 2 exercise player. */
+function StretchView() {
+  return jsx('div', {
+    style: { flex: 1, minHeight: 0, display: 'grid', placeItems: 'center' },
+    children: jsx('div', {
+      style: { fontSize: 28, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-tertiary)' },
+      children: 'Stretch here'
+    })
+  })
+}
+
+/** One-line agent status for the pane's top bar. */
+function AgentStatus({ model }) {
+  const { busy, elapsed, rec } = useFocusedStatus(model.$activity)
+  const bySession = useValue(model.$bySession)
+  const elsewhere = !busy && anyBusy(bySession)
+  const text = busy
+    ? `Hermes is working${elapsed != null ? ` · ${formatDuration(elapsed)}` : ''}`
+    : elsewhere
+      ? 'Hermes is working in another chat'
+      : rec && rec.lastDurationMs != null
+        ? `Hermes finished · took ${formatDuration(rec.lastDurationMs)}`
+        : 'Hermes is idle'
+  return jsxs('span', {
+    style: { display: 'inline-flex', alignItems: 'center', gap: 8, ...S.muted },
+    children: [jsx(Dot, { on: busy || elsewhere }), jsx('span', { style: S.mono, children: text })]
+  })
+}
+
+function prefersReducedMotion() {
+  return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+}
+
+/**
+ * Enter/exit motion for our OWN root element (Web Animations API on a ref —
+ * no injected CSS, no app DOM). The layout zone itself snaps; this softens it.
+ */
+function usePaneMotion(ref, closing) {
+  // Runs on mount (enter) and whenever `closing` flips: true → exit,
+  // false again (work resumed mid-exit) → enter.
+  useEffect(() => {
+    const el = ref.current
+    if (!el || typeof el.animate !== 'function' || prefersReducedMotion()) return undefined
+    const hidden = { opacity: 0, transform: 'translateY(16px)' }
+    const shown = { opacity: 1, transform: 'translateY(0)' }
+    const anim = el.animate(closing ? [shown, hidden] : [hidden, shown], {
+      duration: closing ? EXIT_MS : ENTER_MS,
+      easing: closing ? EASE_IN : EASE_OUT,
+      fill: 'both'
+    })
+    return () => anim.cancel()
+  }, [closing])
+}
+
+function StretchPane({ model }) {
+  const ui = useValue(model.$ui)
+  const closing = useValue(model.$closing)
+  const rootRef = useRef(null)
+  usePaneMotion(rootRef, closing)
+  const { setView, hidePane } = model.actions
+  const bar = jsxs('div', {
+    style: { display: 'flex', alignItems: 'center', gap: 12 },
+    children: [
+      jsx(AgentStatus, { model }),
+      jsx('span', { style: { flex: 1 } }),
+      jsx(TextToggle, { value: ui.view, onChange: setView, options: [['stretch', 'stretch'], ['debug', 'debug']] }),
+      jsx('span', { style: S.faint, children: '·' }),
+      jsx(TextButton, { onClick: hidePane, title: 'Hide until the next task', children: 'hide' })
+    ]
+  })
+  return jsxs('div', {
+    ref: rootRef,
+    style: { height: '100%', padding: 12, display: 'flex', flexDirection: 'column', gap: 10, fontSize: 12 },
+    children: [bar, ui.view === 'debug' ? jsx(DebugView, { model }) : jsx(StretchView, {})]
   })
 }
 
@@ -311,6 +424,11 @@ export default {
     // Per-registration stores: a hot reload gets fresh ones, never stacked state.
     const $activity = atom(emptyActivity())
     const $events = atom({ counts: {}, recent: [] })
+    /** pinned: user opened the pane by hand; dismissed: user hid it during the current busy spell. */
+    const $ui = atom({ pinned: false, dismissed: false, view: 'stretch' })
+    const $paneOpen = atom(false)
+    /** True while the exit animation plays, just before the pane is unregistered. */
+    const $closing = atom(false)
 
     // Per-session turn-busy map. Fall back to the focused flag on older
     // desktops that lack busyBySession (this fallback can't tell a session
@@ -319,6 +437,64 @@ export default {
       host.state.busyBySession ||
       computed([host.state.busy, host.state.focusedSessionId], (busy, id) => ({ [id || 'focused']: busy }))
 
+    const patchUi = patch => $ui.set({ ...$ui.get(), ...patch })
+
+    // ── Pane lifecycle ───────────────────────────────────────────────────────
+    // The pane contribution only EXISTS while it should show (same pattern as
+    // core's ⌘K-summoned Logs pane): registered when work starts, disposed a
+    // moment after all work ends, so the idle layout is untouched.
+    //   want → mount (or cancel a pending exit)
+    //   !want → [grace HIDE_DELAY_MS unless immediate] → exit anim EXIT_MS → unregister
+    const model = { $activity, $events, $bySession, $ui, $paneOpen, $closing, actions: {} }
+    const paneContribution = {
+      id: 'pane',
+      area: 'panes',
+      title: 'Stretch Break',
+      data: { placement: 'bottom', dock: { pane: 'workspace', pos: 'bottom' }, height: PANE_HEIGHT },
+      render: () => jsx(StretchPane, { model })
+    }
+    let disposePane = null
+    let cancelGrace = null
+    let cancelExit = null
+    const stop = cancel => {
+      if (cancel) cancel()
+      return null
+    }
+    const mountPane = () => {
+      cancelGrace = stop(cancelGrace)
+      if (cancelExit) {
+        cancelExit = stop(cancelExit) // work resumed mid-exit: animate back in
+        $closing.set(false)
+      }
+      if (disposePane) return
+      disposePane = ctx.register(paneContribution)
+      $paneOpen.set(true)
+    }
+    const beginExit = () => {
+      cancelGrace = stop(cancelGrace)
+      if (!disposePane || cancelExit) return
+      $closing.set(true)
+      cancelExit = ctx.setTimeout(() => {
+        cancelExit = null
+        const dispose = disposePane
+        disposePane = null
+        dispose()
+        $closing.set(false)
+        $paneOpen.set(false)
+      }, EXIT_MS)
+    }
+    const wantPane = () => shouldShowPane({ anyBusy: anyBusy($bySession.get()), ...$ui.get() })
+    const syncPane = ({ immediate = false } = {}) => {
+      if (wantPane()) return mountPane()
+      if (!disposePane) return
+      if (immediate) return beginExit()
+      cancelGrace ??= ctx.setTimeout(() => {
+        cancelGrace = null
+        if (!wantPane()) beginExit()
+      }, HIDE_DELAY_MS)
+    }
+    const paneShowing = () => Boolean(disposePane) && !cancelExit
+
     // ── Turn transitions from busyBySession ──────────────────────────────────
     let prevBusy = {}
     const onBusyMap = next => {
@@ -326,9 +502,10 @@ export default {
       const transitions = diffBusy(prevBusy, map)
       prevBusy = { ...map }
       if (transitions.length) $activity.set(applyTransitions($activity.get(), transitions, Date.now()))
+      // A dismissal lasts until every session is idle again.
+      if (!anyBusy(map) && $ui.get().dismissed) patchUi({ dismissed: false })
+      syncPane()
     }
-    onBusyMap($bySession.get()) // seed: turns already running at load count as starting now
-    ctx.onDispose($bySession.listen(onBusyMap))
 
     // ── Raw gateway events (discovery aid for later stages) ──────────────────
     // Counts are batched and flushed once a second so per-token deltas don't
@@ -351,42 +528,46 @@ export default {
       $events.set({ counts: { ...counts }, recent: [...recent] })
     }, 1000)
 
-    const clear = () => {
-      counts = {}
-      recent = []
-      $events.set({ counts: {}, recent: [] })
-      // Keep in-flight turns' start times; drop history.
-      const sessions = {}
-      for (const [id, rec] of Object.entries($activity.get().sessions)) {
-        if (rec.busy) sessions[id] = { ...rec, turns: 0, lastDurationMs: null }
-      }
-      $activity.set({ sessions, log: [] })
+    // ── Actions ──────────────────────────────────────────────────────────────
+    const hidePane = () => {
+      patchUi({ pinned: false, dismissed: anyBusy($bySession.get()) })
+      syncPane({ immediate: true })
     }
-
-    ctx.registerMany([
-      {
-        id: 'chip',
-        area: STATUSBAR_AREAS.right,
-        order: 125,
-        render: () => jsx(StatusChip, { $activity })
-      },
-      {
-        id: 'pane',
-        area: 'panes',
-        title: 'Stretch Break',
-        data: { placement: 'bottom', dock: { pane: 'workspace', pos: 'bottom' }, height: '240px' },
-        render: () => jsx(ActivityPane, { $activity, $events, $bySession, clear })
-      },
-      {
-        id: 'clear',
-        area: PALETTE_AREA,
-        data: {
-          id: 'stretch-break.clear',
-          label: 'Stretch Break: Clear activity log',
-          keywords: ['stretch', 'activity', 'debug'],
-          run: clear
+    const showPane = (view = $ui.get().view) => {
+      patchUi({ pinned: true, dismissed: false, view })
+      syncPane()
+    }
+    Object.assign(model.actions, {
+      hidePane,
+      showPane,
+      togglePane: () => (paneShowing() ? hidePane() : showPane()),
+      setView: view => patchUi({ view }),
+      clear: () => {
+        counts = {}
+        recent = []
+        $events.set({ counts: {}, recent: [] })
+        // Keep in-flight turns' start times; drop history.
+        const sessions = {}
+        for (const [id, rec] of Object.entries($activity.get().sessions)) {
+          if (rec.busy) sessions[id] = { ...rec, turns: 0, lastDurationMs: null }
         }
+        $activity.set({ sessions, log: [] })
       }
+    })
+
+    onBusyMap($bySession.get()) // seed: turns already running at load count as starting now
+    ctx.onDispose($bySession.listen(onBusyMap))
+
+    const palette = (id, label, run) => ({
+      id,
+      area: PALETTE_AREA,
+      data: { id: `stretch-break.${id}`, label: `Stretch Break: ${label}`, keywords: ['stretch', 'break'], run }
+    })
+    ctx.registerMany([
+      { id: 'chip', area: STATUSBAR_AREAS.right, order: 125, render: () => jsx(StatusChip, { model }) },
+      palette('toggle', 'Toggle panel', model.actions.togglePane),
+      palette('debug', 'Show debug panel', () => showPane('debug')),
+      palette('clear', 'Clear activity log', model.actions.clear)
     ])
   }
 }

@@ -130,7 +130,18 @@ Keep the desktop half at `desktop/plugin.js`, **not** the repo root. A root
 - When stuck, use ⌘K → **Reload desktop plugins**. Load errors appear as
   toasts and in `hermes logs gui -f`.
 - `hermes plugins doctor stretch-break` warns if Desktop runs a stale copy.
-- Closing the plugin's only pane **disables the plugin**.
+- Closing the plugin's only pane through the layout (tab ✕ / ⌘W)
+  **disables the plugin**. Always offer our own hide/dismiss control.
+- **Pane lifecycle:** the pane contribution only exists while it should
+  show. It's added with `ctx.register(...)` when work starts and removed via
+  its disposer after `HIDE_DELAY_MS` once all work ends. This mirrors core's
+  ⌘K-summoned Logs pane in `apps/desktop/src/app/contrib/controller.tsx`.
+  Height is `'50vh'`, since core panes use vh units. Don't use `when` for
+  panes, because how often it re-runs isn't documented.
+- **Motion:** the layout zone snaps, because Hermes doesn't animate zone
+  sizes and we can't touch app DOM. We animate only our own root element
+  with the Web Animations API (`el.animate` on a ref). Removal waits for the
+  exit animation (`$closing`, `EXIT_MS`), and reduced motion is honoured.
 - Python changes (later) need `hermes plugins enable stretch-break` and a
   Hermes restart. `register()` runs once at startup, and `plugin_api.py` is
   imported only if the plugin is in `plugins.enabled`.

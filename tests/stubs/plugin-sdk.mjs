@@ -42,4 +42,4 @@ export const useValue = a => a.get()
 export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' }
 export const PALETTE_AREA = 'palette'
 export const Button = () => null
-export const Tip = () => null
+export const Tip = ({ children }) => children

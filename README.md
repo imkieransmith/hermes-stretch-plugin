@@ -13,13 +13,25 @@ Nov 11 2026, 5 PM EST).
 ## What's in Stage 1
 
 - **Status-bar chip** (bottom-right): `● Working 0:42` / `○ Idle` for the chat
-  you're looking at. Hover for the last turn's duration.
-- **"Stretch Break" pane**, docked below the conversation:
-  - focused session id, `awaitingResponse`, busy sessions, gateway socket
-  - turn transitions (`▶ start` / `■ finish after 0:42`), scoped to
-    **this chat** by default, or **all chats** (one app-wide log)
-  - live gateway event counts and recent events (to plan Stages 2–3)
-- **⌘K → "Stretch Break: Clear activity log"**
+  you're looking at. Hover for the last turn's duration; **click to show/hide
+  the pane** (works while idle too).
+- **"Stretch Break" pane**, docked below the conversation at ~1/2 of the
+  window height. It **only exists while Hermes is working** (any chat): it
+  slides/fades in when a turn starts; when all work ends it shows "Hermes
+  finished · took 0:23" for ~2.5 s (which also avoids a flash between
+  back-to-back turns), then fades out and is removed. The layout itself snaps
+  (Hermes doesn't animate zone sizes); only our content animates, and not at
+  all with *Reduce motion* on. Top bar: agent status · `stretch | debug` ·
+  `hide` (hides until the next task).
+  - **stretch** view: a "Stretch here" placeholder for Stage 2.
+  - **debug** view: focused session id, `awaitingResponse`, busy sessions,
+    gateway socket; turn transitions (`▶ start` / `■ finish after 0:42`) for
+    **this chat** or **all chats**; live gateway event counts/recent events.
+- **⌘K**: "Stretch Break: Toggle panel", "Show debug panel", "Clear activity
+  log".
+
+The turn log lives in memory only: it resets when the plugin hot-reloads or
+the app restarts.
 
 Detection uses `host.state.busyBySession` (runtime session id → mid-turn), so
 switching chats is never mistaken for a finished turn, and concurrent turns in
@@ -89,9 +101,9 @@ Use a cheap or local model. Run through these checks:
 6. **Hot reload**: edit a label in `desktop/plugin.js` and save. The UI
    updates without duplicate chips or panes.
 
-Note that closing the pane disables the plugin, because it's the plugin's only
-pane. To get it back, re-enable the plugin in Capabilities → Plugins or use
-*Reset layout*.
+Use the pane's own **hide** link, not a tab ✕ or ⌘W. Closing it through the
+layout disables the plugin, because it's the plugin's only pane. To get it
+back, re-enable the plugin in Capabilities → Plugins.
 
 ## Unit tests
 
