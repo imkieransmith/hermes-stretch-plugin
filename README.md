@@ -3,9 +3,9 @@
 A Hermes Desktop plugin that turns agent waiting time into a short, gentle,
 guided desk-stretch break.
 
-> **Status: Stage 2 — one guided exercise.** A pane appears while Hermes works
-> and offers a neck side tilt (one 20 s hold per side) with a countdown ring.
-> Auto-start and finish-the-current-rep behaviour come in Stage 3.
+> **Status: proof of concept done; now polishing.** When a task has used a
+> tool and run for 10 s, a pane slides in below the chat offering a short
+> guided neck stretch, with a cooldown and user settings.
 
 Entry for the Nous Research Hermes Agent Plugin Hackathon (deadline
 Nov 11 2026, 5 PM EST).
@@ -15,24 +15,35 @@ Nov 11 2026, 5 PM EST).
 - **Status-bar chip** (bottom-right): `● Working 0:42` / `○ Idle` for the chat
   you're looking at. Hover for the last turn's duration; **click to show/hide
   the pane** (works while idle too).
+- **When it offers:** once a task has **used a tool** and run for **10 s**
+  (configurable). Chat-only replies never trigger it. It offers at most once
+  per busy spell, and not again within the **cooldown** (default 20 min after
+  a stretch, or after declining one; persisted across restarts).
 - **"Stretch Break" pane**, docked below the conversation at ~1/2 of the
-  window height. It **only exists while Hermes is working** (any chat): it
-  slides/fades in when a turn starts; when all work ends it shows "Hermes
-  finished · took 0:23" for ~2.5 s (which also avoids a flash between
-  back-to-back turns), then fades out and is removed. The layout itself snaps
-  (Hermes doesn't animate zone sizes); only our content animates, and not at
-  all with *Reduce motion* on. Top bar: agent status · `stretch | debug` ·
-  `hide` (hides until the next task).
-  - **stretch** view: the exercise player. **Start** → 3 s "get ready" →
-    20 s hold (left) → 4 s "switch" → 20 s hold (right) → "Nice one ✓".
-    Countdown ring, rep dots, **Pause/Resume**, **skip** (next step),
-    **stop**. While a routine runs, the pane stays up even if Hermes
-    finishes; `hide` stops the routine.
+  window height. It only exists while needed. It slides/fades in when
+  offered, and fades out when done. The layout itself snaps, because Hermes
+  doesn't animate zone sizes; only our content animates, and not at all with
+  *Reduce motion* on. Top bar: agent status · `stretch | debug` · `hide`.
+  - **Offer:** "Starting in 5…" ring, then straight into the first hold, with
+    **Start now** / **not now**. If Hermes finishes during the countdown, the
+    offer is withdrawn quietly, with no cooldown. With auto-start off, it
+    shows a **Start** button instead.
+  - **Stretch:** 20 s hold (left) → 4 s "switch" → 20 s hold (right) →
+    "Nice one ✓". It has a countdown ring, rep dots, **Pause/Resume**,
+    **skip** and **stop**. A stretch underway keeps the pane up after Hermes
+    finishes. `stop`, `not now` and `hide` close it straight away.
   - **debug** view: focused session id, `awaitingResponse`, busy sessions,
     gateway socket; turn transitions (`▶ start` / `■ finish after 0:42`) for
     **this chat** or **all chats**; live gateway event counts/recent events.
-- **⌘K**: "Stretch Break: Toggle panel", "Show debug panel", "Clear activity
-  log".
+- **Settings ▸ Plugins ▸ Stretch Break**:
+  - Offer stretch breaks (on/off)
+  - Offer after (10/20/30/60 s)
+  - Start automatically (on/off)
+  - Time between breaks (none/10/20/30/45 min)
+- **⌘K**: "Stretch Break: Toggle panel", "Pause / resume stretch offers",
+  "Open settings", "Show debug panel", "Clear activity log".
+- **Dev:** `DEV.keepPaneOpen` in `desktop/plugin.js` keeps the pane always
+  open while developing. It's currently **on**; turn it off before release.
 
 The turn log lives in memory only: it resets when the plugin hot-reloads or
 the app restarts.

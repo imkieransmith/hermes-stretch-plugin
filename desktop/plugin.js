@@ -1,10 +1,16 @@
 /**
  * Stretch Break — Hermes Desktop plugin (desktop half of the unified package).
  *
- * STAGE 1: agent-activity detection only.
- *   - Status-bar chip: Idle / Working (+ elapsed) for the FOCUSED chat.
- *   - Bottom pane ("Stretch Break · activity"): a debug view of turn
- *     start/finish transitions per session and the raw gateway event stream.
+ * What it does:
+ *   - Status-bar chip: Idle / Working (+ elapsed) for the focused chat; click
+ *     to open/close the pane by hand.
+ *   - When a task has used a tool and run `offerDelaySec`, a pane slides in
+ *     below the chat offering a short guided stretch (auto-start countdown or
+ *     Start button), subject to a cooldown. A stretch underway keeps the pane
+ *     up after Hermes finishes.
+ *   - Settings ▸ Plugins ▸ Stretch Break: offers on/off, delay, auto-start,
+ *     cooldown (ctx.storage).
+ *   - A debug view (turn transitions, gateway events) for development.
  *
  * Rules (see AGENTS.md):
  *   - Loaded uncompiled: no JSX; only `@hermes/plugin-sdk`, `react`,
@@ -16,7 +22,20 @@
  * Pure logic is exported at the top of the file and unit-tested in tests/.
  */
 
-import { host, atom, computed, useValue, STATUSBAR_AREAS, PALETTE_AREA, Button, Tip } from '@hermes/plugin-sdk'
+import {
+  host,
+  atom,
+  computed,
+  useValue,
+  pluginSettingsHref,
+  STATUSBAR_AREAS,
+  PALETTE_AREA,
+  Button,
+  ListRow,
+  SegmentedControl,
+  Tip,
+  ToggleRow
+} from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { useEffect, useRef, useState } from 'react'
 
@@ -118,13 +137,59 @@ export function anyBusy(map) {
 
 /**
  * Should the Stretch Break pane exist right now?
- * - pinned: the user opened it by hand (chip / ⌘K) — shows regardless.
- * - otherwise it shows while any session is working, unless the user hid it
- *   during this busy spell (dismissed, reset once everything is idle).
+ * - pinned: the user opened it by hand (chip / ⌘K).
+ * - offered: we auto-offered a stretch during the current busy spell.
+ * - routineActive: a stretch is underway — stays up even after Hermes finishes.
  */
-export function shouldShowPane({ anyBusy: busy, pinned, dismissed, routineActive = false }) {
-  // A routine underway keeps the pane up even after Hermes finishes.
-  return Boolean(pinned || routineActive || (busy && !dismissed))
+export function shouldShowPane({ pinned = false, offered = false, routineActive = false }) {
+  return Boolean(pinned || offered || routineActive)
+}
+
+// ── Settings + offer policy (pure) ───────────────────────────────────────────
+
+export const DEFAULT_SETTINGS = {
+  /** Master switch for automatic offers (the chip / ⌘K still open it by hand). */
+  offersEnabled: true,
+  /** A turn must have used a tool and run this long before we offer. */
+  offerDelaySec: 10,
+  /** Count down and start by itself, vs. wait for the Start button. */
+  autoStart: true,
+  /** No automatic offer within this long of the last break (0 = every task). */
+  cooldownMin: 20
+}
+export const OFFER_DELAY_CHOICES = [10, 20, 30, 60]
+export const COOLDOWN_CHOICES = [0, 10, 20, 30, 45]
+
+/** Merge stored settings over the defaults, dropping anything malformed. */
+export function normalizeSettings(raw) {
+  const s = { ...DEFAULT_SETTINGS }
+  if (!raw || typeof raw !== 'object') return s
+  for (const key of ['offersEnabled', 'autoStart']) if (typeof raw[key] === 'boolean') s[key] = raw[key]
+  for (const key of ['offerDelaySec', 'cooldownMin']) {
+    const n = raw[key]
+    if (typeof n === 'number' && Number.isFinite(n) && n >= 0) s[key] = n
+  }
+  return s
+}
+
+export function inCooldown(lastBreakAt, cooldownMin, now) {
+  return lastBreakAt != null && cooldownMin > 0 && now - lastBreakAt < cooldownMin * 60_000
+}
+
+/**
+ * Offer a stretch for this busy spell? `spell` = { startedAt, toolSeen, offered }
+ * (one per stretch of time where any chat is working).
+ */
+export function shouldOffer({ spell, settings, lastBreakAt, routinePhase, now }) {
+  return Boolean(
+    spell &&
+      !spell.offered &&
+      spell.toolSeen &&
+      now - spell.startedAt >= settings.offerDelaySec * 1000 &&
+      settings.offersEnabled &&
+      routinePhase === 'idle' &&
+      !inCooldown(lastBreakAt, settings.cooldownMin, now)
+  )
 }
 
 /** Log entries for the pane's scope: 'chat' = focused session only, 'all' = every session. */
@@ -150,9 +215,12 @@ export const EXERCISE = {
 /** "Get ready" before the first rep, and the pause between reps. */
 export const PREP_MS = 3_000
 export const REST_MS = 4_000
+/** Auto-start countdown ("Starting in 5…"); it replaces the get-ready phase. */
+export const OFFER_MS = 5_000
 
 /**
- * Routine state. Phases: idle → prep → hold → (rest → hold)* → done.
+ * Routine state. Phases: idle → prep → hold → (rest → hold)* → done,
+ * or, auto-started: offer → hold → … (the countdown is the get-ready).
  * `endsAt` is the wall-clock end of the current phase; while paused,
  * `pausedAt` freezes time and resuming shifts `endsAt` by the pause length.
  */
@@ -164,18 +232,29 @@ export function startRoutine(ex, now) {
   return { phase: 'prep', rep: 0, endsAt: now + PREP_MS, pausedAt: null }
 }
 
+export function offerRoutine(now) {
+  return { phase: 'offer', rep: 0, endsAt: now + OFFER_MS, pausedAt: null }
+}
+
+/** A stretch is underway (the user is committed; keep the pane up). */
 export function isRoutineActive(s) {
   return s.phase === 'prep' || s.phase === 'hold' || s.phase === 'rest'
 }
 
+/** The current phase has a running clock (includes the offer countdown). */
+export function isTimed(s) {
+  return s.phase === 'offer' || isRoutineActive(s)
+}
+
 export function phaseDurationMs(ex, phase) {
-  return phase === 'prep' ? PREP_MS : phase === 'hold' ? ex.holdMs : phase === 'rest' ? REST_MS : 0
+  return { offer: OFFER_MS, prep: PREP_MS, hold: ex.holdMs, rest: REST_MS }[phase] || 0
 }
 
 /** Move to the next phase, starting it at `at`. */
 export function advanceRoutine(s, ex, at) {
   const next = (phase, rep) => ({ phase, rep, endsAt: at + phaseDurationMs(ex, phase), pausedAt: null })
   switch (s.phase) {
+    case 'offer':
     case 'prep':
       return next('hold', s.rep)
     case 'hold':
@@ -190,7 +269,7 @@ export function advanceRoutine(s, ex, at) {
 /** Catch up to `now` (handles missed ticks precisely). Returns `s` itself if nothing changed. */
 export function tickRoutine(s, ex, now) {
   let cur = s
-  while (isRoutineActive(cur) && cur.pausedAt == null && now >= cur.endsAt) cur = advanceRoutine(cur, ex, cur.endsAt)
+  while (isTimed(cur) && cur.pausedAt == null && now >= cur.endsAt) cur = advanceRoutine(cur, ex, cur.endsAt)
   return cur
 }
 
@@ -202,13 +281,13 @@ export function resumeRoutine(s, now) {
   return s.pausedAt == null ? s : { ...s, endsAt: s.endsAt + (now - s.pausedAt), pausedAt: null }
 }
 
-/** Skip the rest of the current phase (unpauses). */
+/** Skip the rest of the current phase (unpauses). On an offer: start now. */
 export function skipRoutine(s, ex, now) {
-  return isRoutineActive(s) ? advanceRoutine(s, ex, now) : s
+  return isTimed(s) ? advanceRoutine(s, ex, now) : s
 }
 
 export function remainingMs(s, now) {
-  if (!isRoutineActive(s)) return 0
+  if (!isTimed(s)) return 0
   return Math.max(0, s.endsAt - (s.pausedAt ?? now))
 }
 
@@ -272,14 +351,16 @@ function useFocusedStatus($activity) {
 function StatusChip({ model }) {
   const { busy, elapsed, rec } = useFocusedStatus(model.$activity)
   const paneOpen = useValue(model.$paneOpen)
+  const settings = useValue(model.$settings)
   const label = busy ? `Working${elapsed != null ? ` ${formatDuration(elapsed)}` : ''}` : 'Idle'
   const status = busy
     ? 'Hermes is working on this chat'
     : rec && rec.lastDurationMs != null
       ? `Idle · last turn took ${formatDuration(rec.lastDurationMs)}`
       : 'Idle'
+  const offers = settings.offersEnabled ? '' : ' · stretch offers paused'
   return jsx(Tip, {
-    label: `${status} · click to ${paneOpen ? 'hide' : 'show'} Stretch Break`,
+    label: `${status}${offers} · click to ${paneOpen ? 'hide' : 'show'} Stretch Break`,
     children: jsxs('button', {
       type: 'button',
       onClick: model.actions.togglePane,
@@ -507,15 +588,15 @@ function RepDots({ total, current, done }) {
   })
 }
 
-const PHASE_CAPTION = { prep: 'get ready', hold: 'hold', rest: 'switch' }
+const PHASE_CAPTION = { offer: 'starting', prep: 'get ready', hold: 'hold', rest: 'switch' }
 
 /** The exercise player (Stage 2): one exercise, a rep per side. */
 function StretchView({ model }) {
   const ex = EXERCISE
   const s = useValue(model.$routine)
+  const ui = useValue(model.$ui)
   const a = model.actions
-  const active = isRoutineActive(s)
-  useTicker(active && s.pausedAt == null, 200)
+  useTicker(isTimed(s) && s.pausedAt == null, 200)
   const now = Date.now()
 
   const column = children =>
@@ -537,7 +618,34 @@ function StretchView({ model }) {
         style: { ...S.muted, fontSize: 13, margin: 0, paddingLeft: 18, textAlign: 'left', display: 'grid', gap: 4 },
         children: ex.steps.map((t, i) => jsx('li', { children: t }, i))
       }),
-      jsx(Button, { onClick: a.startStretch, children: 'Start' })
+      jsxs('div', {
+        style: { display: 'flex', alignItems: 'center', gap: 14 },
+        children: [
+          jsx(Button, { onClick: a.startStretch, children: 'Start' }),
+          ui.offered ? jsx(TextButton, { onClick: a.notNow, title: 'Skip this break', children: 'not now' }) : null
+        ]
+      })
+    ])
+  }
+
+  if (s.phase === 'offer') {
+    const first = ex.reps[0]
+    return column([
+      jsx('div', { style: { ...S.muted, fontSize: 13 }, children: 'Hermes is on a longer task. Time for a quick stretch?' }),
+      title,
+      jsx(Ring, {
+        progress: phaseProgress(s, ex, now),
+        seconds: Math.ceil(remainingMs(s, now) / 1000),
+        caption: PHASE_CAPTION.offer
+      }),
+      jsx('div', { style: { fontSize: 14, color: 'var(--ui-text-secondary)', minHeight: 40 }, children: `First: ${first.label.toLowerCase()}. ${first.cue}` }),
+      jsxs('div', {
+        style: { display: 'flex', alignItems: 'center', gap: 14 },
+        children: [
+          jsx(Button, { onClick: a.skipStretch, children: 'Start now' }),
+          jsx(TextButton, { onClick: a.notNow, title: 'Skip this break', children: 'not now' })
+        ]
+      })
     ])
   }
 
@@ -659,6 +767,45 @@ function StretchPane({ model }) {
 // Plugin
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Settings ▸ Plugins ▸ Stretch Break — core settings rows, persisted via ctx.storage. */
+function SettingsPage({ model }) {
+  const s = useValue(model.$settings)
+  const set = model.actions.updateSettings
+  const seg = (value, choices, fmt, onPick) =>
+    jsx(SegmentedControl, {
+      value: String(value),
+      onChange: v => onPick(Number(v)),
+      options: choices.map(n => ({ id: String(n), label: fmt(n) }))
+    })
+  return jsxs('div', {
+    children: [
+      jsx(ToggleRow, {
+        label: 'Offer stretch breaks',
+        description:
+          'Offer a short stretch while Hermes works on a longer task. You can always open it from the status bar.',
+        checked: s.offersEnabled,
+        onChange: on => set({ offersEnabled: on })
+      }),
+      jsx(ListRow, {
+        title: 'Offer after',
+        description: 'How long a task has to run (and use a tool) before a stretch is offered.',
+        action: seg(s.offerDelaySec, OFFER_DELAY_CHOICES, n => `${n}s`, n => set({ offerDelaySec: n }))
+      }),
+      jsx(ToggleRow, {
+        label: 'Start automatically',
+        description: `Count down ${OFFER_MS / 1000} seconds, then begin. When off, the stretch waits for you to press Start.`,
+        checked: s.autoStart,
+        onChange: on => set({ autoStart: on })
+      }),
+      jsx(ListRow, {
+        title: 'Time between breaks',
+        description: 'After a stretch (or skipping one), wait this long before offering another.',
+        action: seg(s.cooldownMin, COOLDOWN_CHOICES, n => (n ? `${n}m` : 'none'), n => set({ cooldownMin: n }))
+      })
+    ]
+  })
+}
+
 export default {
   id: PLUGIN_ID,
   name: 'Stretch Break',
@@ -666,14 +813,21 @@ export default {
     // Per-registration stores: a hot reload gets fresh ones, never stacked state.
     const $activity = atom(emptyActivity())
     const $events = atom({ counts: {}, recent: [] })
-    /** pinned: user opened the pane by hand; dismissed: user hid it during the current busy spell. */
-    const $ui = atom({ pinned: false, dismissed: false, view: 'stretch' })
+    /**
+     * pinned: user opened the pane by hand (chip / ⌘K).
+     * offered: we auto-offered a stretch in the current busy spell.
+     */
+    const $ui = atom({ pinned: false, offered: false, view: 'stretch' })
     const $paneOpen = atom(false)
     /** True while the exit animation plays, just before the pane is unregistered. */
     const $closing = atom(false)
     /** Exercise routine state (see idleRoutine/startRoutine). Lives here, not in
      *  the pane, so it survives the pane unmounting and remounting. */
     const $routine = atom(idleRoutine())
+    /** User preferences (Settings ▸ Plugins ▸ Stretch Break), persisted. */
+    const $settings = atom(normalizeSettings(ctx.storage.get('settings', null)))
+    /** When the last break ended (done or declined) — drives the cooldown. Persisted. */
+    let lastBreakAt = ctx.storage.get('lastBreakAt', null)
 
     // Per-session turn-busy map. Fall back to the focused flag on older
     // desktops that lack busyBySession (this fallback can't tell a session
@@ -686,11 +840,11 @@ export default {
 
     // ── Pane lifecycle ───────────────────────────────────────────────────────
     // The pane contribution only EXISTS while it should show (same pattern as
-    // core's ⌘K-summoned Logs pane): registered when work starts, disposed a
-    // moment after all work ends, so the idle layout is untouched.
+    // core's ⌘K-summoned Logs pane): registered when we offer a stretch,
+    // disposed a moment after it's no longer wanted.
     //   want → mount (or cancel a pending exit)
     //   !want → [grace HIDE_DELAY_MS unless immediate] → exit anim EXIT_MS → unregister
-    const model = { $activity, $events, $bySession, $ui, $paneOpen, $closing, $routine, actions: {} }
+    const model = { $activity, $events, $bySession, $ui, $paneOpen, $closing, $routine, $settings, actions: {} }
     const paneContribution = {
       id: 'pane',
       area: 'panes',
@@ -708,7 +862,7 @@ export default {
     const mountPane = () => {
       cancelGrace = stop(cancelGrace)
       if (cancelExit) {
-        cancelExit = stop(cancelExit) // work resumed mid-exit: animate back in
+        cancelExit = stop(cancelExit) // wanted again mid-exit: animate back in
         $closing.set(false)
       }
       if (disposePane) return
@@ -729,8 +883,7 @@ export default {
       }, EXIT_MS)
     }
     const wantPane = () =>
-      DEV.keepPaneOpen ||
-      shouldShowPane({ anyBusy: anyBusy($bySession.get()), routineActive: isRoutineActive($routine.get()), ...$ui.get() })
+      DEV.keepPaneOpen || shouldShowPane({ ...$ui.get(), routineActive: isRoutineActive($routine.get()) })
     const syncPane = ({ immediate = false } = {}) => {
       if (wantPane()) return mountPane()
       if (!disposePane) return
@@ -742,19 +895,52 @@ export default {
     }
     const paneShowing = () => Boolean(disposePane) && !cancelExit
 
+    // ── Offer policy ─────────────────────────────────────────────────────────
+    // A "spell" is a stretch of time where any chat is working. We offer at
+    // most once per spell, once it has used a tool and run offerDelaySec.
+    let spell = null // { startedAt, toolSeen, offered }
+    const markBreak = () => {
+      lastBreakAt = Date.now()
+      ctx.storage.set('lastBreakAt', lastBreakAt)
+    }
+    const maybeOffer = () => {
+      const now = Date.now()
+      const routine = $routine.get()
+      if (!shouldOffer({ spell, settings: $settings.get(), lastBreakAt, routinePhase: routine.phase, now })) return
+      spell.offered = true
+      if ($settings.get().autoStart) $routine.set(offerRoutine(now))
+      patchUi({ offered: true })
+      syncPane()
+    }
+    const endSpell = () => {
+      spell = null
+      // Hermes finished before the user engaged: withdraw quietly (no cooldown)
+      // and leave straight away; a stretch already underway keeps the pane.
+      const withdrawing = $ui.get().offered && !isRoutineActive($routine.get())
+      if ($routine.get().phase === 'offer') $routine.set(idleRoutine())
+      if ($ui.get().offered) patchUi({ offered: false })
+      syncPane({ immediate: withdrawing })
+    }
+    ctx.onEvent('tool.start', () => {
+      if (!spell) return
+      spell.toolSeen = true
+      maybeOffer()
+    })
+
     // ── Turn transitions from busyBySession ──────────────────────────────────
     let prevBusy = {}
     const onBusyMap = next => {
       const map = next || {}
+      const now = Date.now()
       const transitions = diffBusy(prevBusy, map)
       prevBusy = { ...map }
-      if (transitions.length) $activity.set(applyTransitions($activity.get(), transitions, Date.now()))
-      // A dismissal lasts until every session is idle again.
-      if (!anyBusy(map) && $ui.get().dismissed) patchUi({ dismissed: false })
-      syncPane()
+      if (transitions.length) $activity.set(applyTransitions($activity.get(), transitions, now))
+      const busy = anyBusy(map)
+      if (busy && !spell) spell = { startedAt: now, toolSeen: false, offered: false }
+      else if (!busy && spell) endSpell()
     }
 
-    // ── Raw gateway events (discovery aid for later stages) ──────────────────
+    // ── Raw gateway events (debug view) ──────────────────────────────────────
     // Counts are batched and flushed once a second so per-token deltas don't
     // re-render the pane on every token.
     let counts = {}
@@ -775,40 +961,56 @@ export default {
       $events.set({ counts: { ...counts }, recent: [...recent] })
     }, 1000)
 
-    // ── Actions ──────────────────────────────────────────────────────────────
-    // Routine driver: phase changes happen here (not in the pane) so they
-    // advance even while the pane isn't mounted; the pane just renders.
+    // ── Routine driver ───────────────────────────────────────────────────────
+    // Phase changes happen here (not in the pane) so they advance even while
+    // the pane isn't mounted; the pane just renders. Also re-checks the offer
+    // (the delay can elapse between events).
     ctx.setInterval(() => {
       const s = $routine.get()
       const next = tickRoutine(s, EXERCISE, Date.now())
       if (next !== s) $routine.set(next)
+      maybeOffer()
     }, 200)
-    // Routine start/end changes whether the pane is wanted (e.g. done after
-    // Hermes already finished → linger, then leave).
-    ctx.onDispose($routine.listen(() => syncPane()))
+    let prevPhase = $routine.get().phase
+    ctx.onDispose(
+      $routine.listen(s => {
+        if (s.phase === 'done' && prevPhase !== 'done') markBreak() // finished a stretch
+        prevPhase = s.phase
+        syncPane() // start/end of a routine changes whether the pane is wanted
+      })
+    )
     const setRoutine = fn => $routine.set(fn($routine.get(), Date.now()))
 
+    // ── Actions ──────────────────────────────────────────────────────────────
     const hidePane = () => {
-      // Hiding is "I'm done with this": stop any routine too.
+      // Closing an offer or a stretch counts as a break for the cooldown.
+      const r = $routine.get()
+      if ($ui.get().offered || isTimed(r)) markBreak()
       $routine.set(idleRoutine())
-      patchUi({ pinned: false, dismissed: anyBusy($bySession.get()) })
+      patchUi({ pinned: false, offered: false })
       syncPane({ immediate: true })
     }
     const showPane = (view = $ui.get().view) => {
-      patchUi({ pinned: true, dismissed: false, view })
+      patchUi({ pinned: true, view })
       syncPane()
+    }
+    const updateSettings = patch => {
+      $settings.set(normalizeSettings({ ...$settings.get(), ...patch }))
+      ctx.storage.set('settings', $settings.get())
     }
     Object.assign(model.actions, {
       hidePane,
       showPane,
       togglePane: () => (paneShowing() ? hidePane() : showPane()),
       setView: view => patchUi({ view }),
+      updateSettings,
       startStretch: () => setRoutine((_, now) => startRoutine(EXERCISE, now)),
       pauseStretch: () => setRoutine(pauseRoutine),
       resumeStretch: () => setRoutine(resumeRoutine),
       skipStretch: () => setRoutine((s, now) => skipRoutine(s, EXERCISE, now)),
-      // Stop = done with the stretch: close now (just the exit fade, no grace period).
+      // Stop / not now = done with it: close now (exit fade only, no grace period).
       stopStretch: hidePane,
+      notNow: hidePane,
       clear: () => {
         counts = {}
         recent = []
@@ -822,8 +1024,9 @@ export default {
       }
     })
 
-    onBusyMap($bySession.get()) // seed: turns already running at load count as starting now
+    onBusyMap($bySession.get()) // seed: turns already running at load start a spell now
     ctx.onDispose($bySession.listen(onBusyMap))
+    syncPane()
 
     const palette = (id, label, run) => ({
       id,
@@ -833,8 +1036,20 @@ export default {
     ctx.registerMany([
       { id: 'chip', area: STATUSBAR_AREAS.right, order: 125, render: () => jsx(StatusChip, { model }) },
       palette('toggle', 'Toggle panel', model.actions.togglePane),
+      palette('offers', 'Pause / resume stretch offers', () =>
+        updateSettings({ offersEnabled: !$settings.get().offersEnabled })
+      ),
+      palette('settings', 'Open settings', () => host.navigate(pluginSettingsHref(PLUGIN_ID))),
       palette('debug', 'Show debug panel', () => showPane('debug')),
       palette('clear', 'Clear activity log', model.actions.clear)
     ])
+
+    // Feature-detected: older hosts lack registerSettingsPage.
+    ctx.registerSettingsPage?.({
+      id: 'settings',
+      title: 'Stretch Break',
+      icon: 'heart',
+      render: () => jsx(SettingsPage, { model })
+    })
   }
 }

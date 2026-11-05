@@ -43,3 +43,8 @@ export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right
 export const PALETTE_AREA = 'palette'
 export const Button = () => null
 export const Tip = ({ children }) => children
+export const ListRow = () => null
+export const ToggleRow = () => null
+export const SegmentedControl = () => null
+export const pluginSettingsHref = (id, page) => `/settings?tab=plugins&plugin=${id}${page ? `&ppage=${page}` : ''}`
+host.navigate = () => {}

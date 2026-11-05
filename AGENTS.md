@@ -20,13 +20,22 @@ and the quality of the interaction high.
 1. **Agent-activity detection** ✅ (tested in Hermes). Show Idle/Working for
    the focused chat. Detect turn start/finish reliably across repeated tasks,
    session switches and interrupts.
-2. **Guided exercises** ← *current*. The user scoped it down to **one
+2. **Guided exercises** ✅ (POC). The user scoped it down to **one
    exercise** (neck side tilt, one rep per side), shown as text plus a
    countdown ring; there's no library or sequences yet. Original plan: Build a small curated library of desk-friendly
    movements. Show name, short instructions, a fixed-duration countdown, and
    pause/skip/dismiss controls. Don't rely on the model to estimate
    durations.
-3. **Agent integration.** Offer the routine automatically when a turn starts.
+3. **Agent integration** ← *current, mostly done*. The offer fires once the
+   busy spell has seen a `tool.start` event and run `offerDelaySec`. It's a
+   5 s auto-start countdown with not now, a cooldown persisted in
+   `ctx.storage` (`lastBreakAt`), and a settings page
+   (`ctx.registerSettingsPage`, using core `ToggleRow` / `ListRow` /
+   `SegmentedControl`). The user decided **no model-based duration
+   estimate** and **no glowing-chip pre-offer**. Still to do: finish the
+   current rep (not the whole routine) when Hermes finishes, and handle
+   Hermes waiting on the user (approval/question) mid-stretch. Original
+   brief: Offer the routine automatically when a turn starts.
    The user must be able to ignore or dismiss it harmlessly. On finish, show a
    subtle completion state, and let the current rep finish rather than
    interrupting it.
@@ -154,8 +163,10 @@ tails, and to paste back the output.
 
 ## Testing
 
-- `npm test` runs pure-logic tests plus `register(ctx)` against fake host
-  atoms. Add a test for every piece of pure logic and every state-machine
+- `npm test` runs `tests/logic.test.mjs` (pure logic) and
+  `tests/plugin.test.mjs`. The second runs `register(ctx)` against fake host
+  atoms, using `tests/helpers.mjs` for a fake ctx with storage, events and a
+  controllable clock: `ctx.advance(ms)` fires timers and intervals. Add a test for every piece of pure logic and every state-machine
   edge case: repeated turns, session switches, interrupts, hot reload and
   dispose.
 - `npm run check` runs `node --check` plus the tests. Run it before saying
