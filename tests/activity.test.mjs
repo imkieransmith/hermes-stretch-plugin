@@ -3,6 +3,20 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import plugin, {
+  DEV,
+  EXERCISE,
+  PREP_MS,
+  REST_MS,
+  advanceRoutine,
+  idleRoutine,
+  isRoutineActive,
+  pauseRoutine,
+  phaseProgress,
+  remainingMs,
+  resumeRoutine,
+  skipRoutine,
+  startRoutine,
+  tickRoutine,
   anyBusy,
   applyTransitions,
   diffBusy,
@@ -13,6 +27,9 @@ import plugin, {
   shouldShowPane
 } from '../desktop/plugin.js'
 import { host } from '@hermes/plugin-sdk'
+
+// Tests exercise the real show/hide behaviour, not the dev "always open" mode.
+DEV.keepPaneOpen = false
 
 // ── pure logic ──────────────────────────────────────────────────────────────
 
@@ -239,6 +256,133 @@ test('pane: chip toggle pins it open while idle, debug command opens debug view'
   ctx.dispose()
 })
 
+// ── routine (pure) ──────────────────────────────────────────────────────────
+
+const HOLD = EXERCISE.holdMs
+const phases = s => `${s.phase}:${s.rep}`
+
+test('routine: full run prep → hold → rest → hold → done', () => {
+  let s = startRoutine(EXERCISE, 0)
+  assert.equal(phases(s), 'prep:0')
+  assert.equal(EXERCISE.reps.length, 2)
+  s = tickRoutine(s, EXERCISE, PREP_MS - 1)
+  assert.equal(phases(s), 'prep:0', 'not yet')
+  s = tickRoutine(s, EXERCISE, PREP_MS)
+  assert.equal(phases(s), 'hold:0')
+  assert.equal(s.endsAt, PREP_MS + HOLD, 'chained from the previous end, not from tick time')
+  s = tickRoutine(s, EXERCISE, PREP_MS + HOLD + 1)
+  assert.equal(phases(s), 'rest:0')
+  s = tickRoutine(s, EXERCISE, PREP_MS + HOLD + REST_MS)
+  assert.equal(phases(s), 'hold:1')
+  s = tickRoutine(s, EXERCISE, PREP_MS + 2 * HOLD + REST_MS)
+  assert.equal(phases(s), 'done:1')
+  assert.equal(isRoutineActive(s), false)
+  assert.equal(tickRoutine(s, EXERCISE, 1e12), s, 'done is terminal')
+})
+
+test('routine: a big gap (sleep, missed ticks) catches up in one tick', () => {
+  const s = tickRoutine(startRoutine(EXERCISE, 0), EXERCISE, 10 * 60_000)
+  assert.equal(s.phase, 'done')
+})
+
+test('routine: tick returns the same object when nothing changes', () => {
+  const s = startRoutine(EXERCISE, 0)
+  assert.equal(tickRoutine(s, EXERCISE, 1), s)
+  assert.equal(tickRoutine(idleRoutine(), EXERCISE, 1e9).phase, 'idle')
+})
+
+test('routine: pause freezes time, resume shifts the deadline', () => {
+  let s = tickRoutine(startRoutine(EXERCISE, 0), EXERCISE, PREP_MS) // hold:0, ends PREP+HOLD
+  s = pauseRoutine(s, PREP_MS + 5_000)
+  assert.equal(remainingMs(s, PREP_MS + 5_000), HOLD - 5_000)
+  assert.equal(remainingMs(s, PREP_MS + 60_000), HOLD - 5_000, 'frozen while paused')
+  assert.equal(tickRoutine(s, EXERCISE, 1e9), s, 'no progress while paused')
+  assert.equal(pauseRoutine(s, 0), s, 'pausing twice is a no-op')
+  s = resumeRoutine(s, PREP_MS + 65_000) // paused for 60s
+  assert.equal(s.pausedAt, null)
+  assert.equal(remainingMs(s, PREP_MS + 65_000), HOLD - 5_000)
+  assert.ok(Math.abs(phaseProgress(s, EXERCISE, PREP_MS + 65_000) - 5_000 / HOLD) < 1e-9)
+})
+
+test('routine: skip advances one phase from now, and clears a pause', () => {
+  let s = startRoutine(EXERCISE, 0)
+  s = skipRoutine(s, EXERCISE, 1_000)
+  assert.equal(phases(s), 'hold:0')
+  assert.equal(s.endsAt, 1_000 + HOLD)
+  s = skipRoutine(pauseRoutine(s, 2_000), EXERCISE, 3_000)
+  assert.equal(phases(s), 'rest:0')
+  assert.equal(s.pausedAt, null)
+  s = skipRoutine(skipRoutine(s, EXERCISE, 4_000), EXERCISE, 5_000)
+  assert.equal(s.phase, 'done')
+  assert.equal(skipRoutine(s, EXERCISE, 6_000), s)
+  assert.equal(advanceRoutine(idleRoutine(), EXERCISE, 0).phase, 'idle')
+})
+
+test('pane: a running routine keeps the pane up after Hermes finishes', () => {
+  host.state.busyBySession.set({})
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { actions, $routine } = modelOf(ctx)
+
+  host.state.busyBySession.set({ a: true })
+  actions.startStretch()
+  assert.equal($routine.get().phase, 'prep')
+  host.state.busyBySession.set({ a: false }) // Hermes done mid-stretch
+  ctx.flushTimers()
+  assert.ok(ctx.pane(), 'stays while the routine runs')
+
+  $routine.set({ ...$routine.get(), phase: 'done', endsAt: null }) // routine finishes
+  ctx.flushTimers() // grace + exit
+  assert.equal(ctx.pane(), undefined, 'leaves once the routine is done')
+  ctx.dispose()
+})
+
+test('pane: stop closes immediately (no grace period) and resets the routine', () => {
+  host.state.busyBySession.set({})
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { actions, $routine, $closing } = modelOf(ctx)
+  actions.togglePane() // pinned open while idle
+  actions.startStretch()
+  actions.stopStretch()
+  assert.equal($routine.get().phase, 'idle')
+  assert.equal($closing.get(), true, 'exit animation starts right away')
+  ctx.stepTimers() // only the exit timer is pending
+  assert.equal(ctx.pane(), undefined)
+  ctx.dispose()
+})
+
+test('DEV.keepPaneOpen keeps the pane up while idle and after stop', () => {
+  DEV.keepPaneOpen = true
+  try {
+    host.state.busyBySession.set({})
+    const ctx = fakeCtx()
+    plugin.register(ctx)
+    assert.ok(ctx.pane(), 'open while idle')
+    modelOf(ctx).actions.stopStretch()
+    ctx.flushTimers()
+    assert.ok(ctx.pane(), 'still open after stop')
+    ctx.dispose()
+  } finally {
+    DEV.keepPaneOpen = false
+  }
+})
+
+test('pane: hide stops a running routine', () => {
+  host.state.busyBySession.set({})
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { actions, $routine } = modelOf(ctx)
+  host.state.busyBySession.set({ a: true })
+  actions.startStretch()
+  actions.hidePane()
+  ctx.flushTimers()
+  assert.equal($routine.get().phase, 'idle')
+  assert.equal(ctx.pane(), undefined)
+  ctx.dispose()
+  host.state.busyBySession.set({})
+})
+
 // ── render smoke test ───────────────────────────────────────────────────────
 
 /** Expand every function component (stub hooks are plain values), so a
@@ -265,9 +409,21 @@ test('render: chip and both pane views render without throwing', () => {
   const seen = []
   renderTree(ctx.contributions.find(c => c.id === 'chip').render(), seen)
   renderTree(ctx.pane().render(), seen)
+  const { $routine } = modelOf(ctx)
+  actions.startStretch() // prep
+  renderTree(ctx.pane().render(), seen)
+  actions.skipStretch() // hold
+  actions.pauseStretch()
+  renderTree(ctx.pane().render(), seen)
+  actions.skipStretch() // rest
+  renderTree(ctx.pane().render(), seen)
+  actions.skipStretch() // hold:1
+  actions.skipStretch() // done
+  assert.equal($routine.get().phase, 'done')
+  renderTree(ctx.pane().render(), seen)
   actions.setView('debug')
   renderTree(ctx.pane().render(), seen)
-  for (const name of ['StatusChip', 'Dot', 'StretchPane', 'StretchView', 'DebugView', 'AgentStatus']) {
+  for (const name of ['StatusChip', 'Dot', 'StretchPane', 'StretchView', 'Ring', 'RepDots', 'DebugView', 'AgentStatus']) {
     assert.ok(seen.includes(name), `rendered ${name}`)
   }
   ctx.dispose()

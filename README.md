@@ -3,14 +3,14 @@
 A Hermes Desktop plugin that turns agent waiting time into a short, gentle,
 guided desk-stretch break.
 
-> **Status: Stage 1 — agent-activity detection.** The plugin shows whether the
-> focused Hermes chat is **Idle** or **Working**, and a debug pane logs every
-> turn start/finish. No exercises yet.
+> **Status: Stage 2 — one guided exercise.** A pane appears while Hermes works
+> and offers a neck side tilt (one 20 s hold per side) with a countdown ring.
+> Auto-start and finish-the-current-rep behaviour come in Stage 3.
 
 Entry for the Nous Research Hermes Agent Plugin Hackathon (deadline
 Nov 11 2026, 5 PM EST).
 
-## What's in Stage 1
+## What's in it now
 
 - **Status-bar chip** (bottom-right): `● Working 0:42` / `○ Idle` for the chat
   you're looking at. Hover for the last turn's duration; **click to show/hide
@@ -23,7 +23,11 @@ Nov 11 2026, 5 PM EST).
   (Hermes doesn't animate zone sizes); only our content animates, and not at
   all with *Reduce motion* on. Top bar: agent status · `stretch | debug` ·
   `hide` (hides until the next task).
-  - **stretch** view: a "Stretch here" placeholder for Stage 2.
+  - **stretch** view: the exercise player. **Start** → 3 s "get ready" →
+    20 s hold (left) → 4 s "switch" → 20 s hold (right) → "Nice one ✓".
+    Countdown ring, rep dots, **Pause/Resume**, **skip** (next step),
+    **stop**. While a routine runs, the pane stays up even if Hermes
+    finishes; `hide` stops the routine.
   - **debug** view: focused session id, `awaitingResponse`, busy sessions,
     gateway socket; turn transitions (`▶ start` / `■ finish after 0:42`) for
     **this chat** or **all chats**; live gateway event counts/recent events.

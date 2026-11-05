@@ -17,11 +17,12 @@ and the quality of the interaction high.
 
 ## Stages (build in order; don't skip ahead)
 
-1. **Agent-activity detection** ← *current*. Show Idle/Working for the focused
-   chat. Detect turn start/finish reliably across repeated tasks, session
-   switches and interrupts. **Don't start Stage 2 until the user confirms
-   Stage 1 works in real Hermes sessions.**
-2. **Guided exercises.** Build a small curated library of desk-friendly
+1. **Agent-activity detection** ✅ (tested in Hermes). Show Idle/Working for
+   the focused chat. Detect turn start/finish reliably across repeated tasks,
+   session switches and interrupts.
+2. **Guided exercises** ← *current*. The user scoped it down to **one
+   exercise** (neck side tilt, one rep per side), shown as text plus a
+   countdown ring; there's no library or sequences yet. Original plan: Build a small curated library of desk-friendly
    movements. Show name, short instructions, a fixed-duration countdown, and
    pause/skip/dismiss controls. Don't rely on the model to estimate
    durations.
@@ -176,9 +177,11 @@ tails, and to paste back the output.
 
 ## Submission checklist (later)
 
-1. Set `homepage`, `requires_hermes` (SemVer floor = tested version), and
-   `version` in `plugin.yaml`.
-2. Open a PR adding `plugin-catalog/stretch-break.yaml` to
+1. Set **`DEV.keepPaneOpen = false`** in `desktop/plugin.js`. It's on during
+   development so the pane is always visible.
+2. Set `homepage`, `requires_hermes` (SemVer floor = tested version), and
+   `version` in `plugin.yaml`. The user is testing on Hermes v0.22.7.
+3. Open a PR adding `plugin-catalog/stretch-break.yaml` to
    NousResearch/hermes-agent. Pin the full 40-character `sha:`.
-3. Post a demo video under 90 seconds on X, tagging @NousResearch.
-4. Submit both links via form.typeform.com/to/FwJLvOln.
+4. Post a demo video under 90 seconds on X, tagging @NousResearch.
+5. Submit both links via form.typeform.com/to/FwJLvOln.
