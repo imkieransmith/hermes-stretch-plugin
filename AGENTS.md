@@ -1,0 +1,173 @@
+# AGENTS.md — Stretch Break (Hermes Desktop plugin)
+
+Instructions for coding agents (Pi, etc.) working in this repo. Read this
+first, then `README.md`.
+
+## Project
+
+A wellness plugin for **Hermes Desktop**. When the agent starts a turn, we
+offer a short, gentle, guided desk-stretch routine. When the agent finishes,
+we show a subtle completion state and never abruptly cut off an exercise that's
+underway.
+
+This is a hackathon entry. The deadline is **Nov 11 2026, 5 PM EST**. Judging
+covers usefulness, reliability, polish and creativity, plus a demo under 90
+seconds. The developer has a full-time job and a family, so keep scope small
+and the quality of the interaction high.
+
+## Stages (build in order; don't skip ahead)
+
+1. **Agent-activity detection** ← *current*. Show Idle/Working for the focused
+   chat. Detect turn start/finish reliably across repeated tasks, session
+   switches and interrupts. **Don't start Stage 2 until the user confirms
+   Stage 1 works in real Hermes sessions.**
+2. **Guided exercises.** Build a small curated library of desk-friendly
+   movements. Show name, short instructions, a fixed-duration countdown, and
+   pause/skip/dismiss controls. Don't rely on the model to estimate
+   durations.
+3. **Agent integration.** Offer the routine automatically when a turn starts.
+   The user must be able to ignore or dismiss it harmlessly. On finish, show a
+   subtle completion state, and let the current rep finish rather than
+   interrupting it.
+4. **Polish.** Add animations, illustrations, optional sound and simple
+   preferences.
+
+Possible later work, only once the core experience is excellent:
+
+- a Python agent half (`/stretch` command, `config_schema` settings,
+  `ctx.state` streaks)
+- a status-bar streak chip
+- `ctx.pet.say` cheers
+
+Out of scope:
+
+- webcam rep counting
+- holding replies via `transform_llm_output`
+- accounts, fitness tracking or gamification
+
+## Hard rules
+
+- **Desktop plugin file (`desktop/plugin.js`)**
+  - It's plain ESM and loaded uncompiled. **No JSX**: use `jsx()` / `jsxs()`
+    from `react/jsx-runtime`.
+  - The **only** imports allowed are `@hermes/plugin-sdk`, `react` and
+    `react/jsx-runtime`.
+  - No relative imports, no dynamic `import()`, no `eval`.
+  - Everything lives in this one file. Keep pure logic in clearly marked
+    exported functions at the top so it's testable.
+  - The default export is `{ id: 'stretch-break', name, register(ctx) }`. The
+    id must equal the folder and package name, and `name` in `plugin.yaml`.
+- **No DOM reach-in.** Don't query or modify app markup, use
+  `document.body` observers, inject `<style>` tags or patch prototypes. Use
+  SDK surfaces only (catalog rule 8).
+- **No hardcoded colours.** Use theme variables only (`var(--ui-accent)`,
+  `var(--ui-text-secondary|tertiary|quaternary)`,
+  `var(--ui-stroke-secondary)`). Leave pane backgrounds alone.
+  - Prefer inline styles over Tailwind classes. Only classes the app itself
+    uses are guaranteed to exist.
+- **Cleanup**
+  - Use `ctx.setInterval` / `ctx.setTimeout` / `ctx.addEventListener` /
+    `ctx.onEvent`, and route any other subscription (for example
+    `atom.listen`) through `ctx.onDispose`. Bare globals survive hot reload
+    and stack up.
+  - Inside React components, `useEffect` with cleanup is fine.
+- **State**
+  - Create stores inside `register()`, not at module scope, so each hot
+    reload gets fresh state.
+  - Read atoms with `.get()` in handlers and `useValue()` in components.
+- **Busy state**
+  - Use `host.state.busy` (focused chat) and `host.state.busyBySession`
+    (per-session).
+  - **Never** use `host.state.gateway` for busy state. That's the socket,
+    not turn-busy.
+- **Don't block or interfere with the agent.** The plugin is purely
+  observational and optional.
+- **No backend services, external APIs, AI calls or network fetches.**
+- **Python half** (when added)
+  - No monkey-patching of Hermes internals.
+  - Never write runtime state into the plugin directory. Use `ctx.state` or
+    `plugin_data_dir()`.
+  - Hook callbacks take `**kwargs`.
+  - Pin upper bounds on dependencies. Ideally have none.
+- **Verify APIs against the docs** in `docs/hermes/` (or the live site), and
+  don't guess signatures.
+  - If a component prop isn't documented (for example `Button` variants),
+    don't use it.
+  - The canonical export list is `apps/desktop/src/sdk/index.ts` in
+    NousResearch/hermes-agent.
+
+## Layout
+
+```
+plugin.yaml           unified-package manifest (name: stretch-break)
+desktop/plugin.js     Desktop half — the whole UI
+tests/*.test.mjs      node:test suites
+tests/stubs/          fake @hermes/plugin-sdk, react, react/jsx-runtime + resolve hooks
+scripts/link.sh       symlink checkout → ~/.hermes/plugins/stretch-break
+docs/hermes/          saved official docs (grep these before guessing)
+```
+
+Later additions:
+
+- `__init__.py` + `brain.py`: Python half, with pure logic and no Hermes
+  imports in `brain.py`
+- `data/stretches.yaml`: exercise library, if it doesn't live in JS
+
+Keep the desktop half at `desktop/plugin.js`, **not** the repo root. A root
+`plugin.js` would make Hermes copy the whole repo (including `docs/` and
+`tests/`) as the desktop half.
+
+## How it's loaded (dev loop)
+
+- `~/.hermes/plugins/stretch-break` is a **symlink** to this repo (via
+  `scripts/link.sh`).
+  - Hermes Desktop copies `desktop/plugin.js` into
+    `~/.hermes/desktop-plugins/stretch-break/` with a `.hermes-package.json`
+    marker (`"linked": true`).
+  - It watches the source, and every save re-syncs and hot-reloads.
+- The desktop half is **opt-in**. The user must toggle it on in
+  Capabilities → Plugins. Check this first if "the plugin doesn't appear".
+- When stuck, use ⌘K → **Reload desktop plugins**. Load errors appear as
+  toasts and in `hermes logs gui -f`.
+- `hermes plugins doctor stretch-break` warns if Desktop runs a stale copy.
+- Closing the plugin's only pane **disables the plugin**.
+- Python changes (later) need `hermes plugins enable stretch-break` and a
+  Hermes restart. `register()` runs once at startup, and `plugin_api.py` is
+  imported only if the plugin is in `plugins.enabled`.
+
+**Sandbox note:** Pi's sandbox can't read or write `~/.hermes`, can't run the
+`hermes` CLI, and can't create `.git`. Ask the user to run those commands,
+such as linking, `hermes plugins doctor/validate`, git operations and log
+tails, and to paste back the output.
+
+## Testing
+
+- `npm test` runs pure-logic tests plus `register(ctx)` against fake host
+  atoms. Add a test for every piece of pure logic and every state-machine
+  edge case: repeated turns, session switches, interrupts, hot reload and
+  dispose.
+- `npm run check` runs `node --check` plus the tests. Run it before saying
+  work is done.
+- Real end-to-end testing happens in Hermes Desktop. The user follows the
+  checklist in `README.md` → *Testing Stage 1*. Mocks never replace testing
+  against a real session.
+- Gates before submission (run by the user):
+  - `hermes plugins doctor . --ci`
+  - `hermes plugins validate . --install-deps`
+
+## Style
+
+- Keep changes small and independently testable, with one stage at a time.
+- Use plain modern JS and two-space indentation. Group `jsx()` trees into
+  small named components.
+- Prioritise the quality of the interaction over adding features. Keep
+  exercises gentle and optional.
+
+## Submission checklist (later)
+
+1. Set `homepage`, `requires_hermes` (SemVer floor = tested version), and
+   `version` in `plugin.yaml`.
+2. Open a PR adding `plugin-catalog/stretch-break.yaml` to
+   NousResearch/hermes-agent. Pin the full 40-character `sha:`.
+3. Post a demo video under 90 seconds on X, tagging @NousResearch.
+4. Submit both links via form.typeform.com/to/FwJLvOln.

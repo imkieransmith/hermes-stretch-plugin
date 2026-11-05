@@ -1,0 +1,15 @@
+{
+  "name": "stretch-break",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hermes Desktop plugin: guided desk stretches while your agent works.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --import ./tests/stubs/setup.mjs --test 'tests/**/*.test.mjs'",
+    "check": "node --check desktop/plugin.js && npm test"
+  },
+  "engines": {
+    "node": ">=20.6"
+  }
+}

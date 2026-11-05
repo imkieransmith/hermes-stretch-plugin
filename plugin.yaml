@@ -1,0 +1,12 @@
+# Hermes plugin manifest — unified package (agent half + desktop half).
+# Stage 1 ships only the desktop half (desktop/plugin.js); there is no
+# __init__.py yet, which `hermes plugins validate` accepts because
+# desktop/plugin.js sits beside this file.
+name: stretch-break
+version: 0.1.0
+description: Guided desk stretches while your Hermes agent works.
+manifest_version: 2
+license: MIT
+tags: [desktop, wellness]
+# homepage: https://github.com/<owner>/stretch-break   # TODO before catalog PR
+# requires_hermes: ">=X.Y.Z"                            # TODO: set to the version we test against
