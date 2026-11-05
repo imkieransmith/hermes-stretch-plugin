@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-import plugin, { applyTransitions, diffBusy, emptyActivity, formatDuration, shortId } from '../desktop/plugin.js'
+import plugin, { applyTransitions, diffBusy, emptyActivity, filterLog, formatDuration, shortId } from '../desktop/plugin.js'
 import { host } from '@hermes/plugin-sdk'
 
 // ── pure logic ──────────────────────────────────────────────────────────────
@@ -39,7 +39,19 @@ test('formatDuration / shortId', () => {
   assert.equal(formatDuration(3_725_000), '1:02:05')
   assert.equal(formatDuration(null), '–')
   assert.equal(shortId('abc'), 'abc')
-  assert.equal(shortId('20261105_abcdef123456'), '2026…3456')
+  assert.equal(shortId('local-1a2b3c4d5e776b'), '…5e776b')
+  assert.equal(shortId(null), '—')
+})
+
+test('filterLog: this chat vs all chats', () => {
+  const log = [
+    { at: 1, sessionId: 'a', kind: 'start' },
+    { at: 2, sessionId: 'b', kind: 'start' },
+    { at: 3, sessionId: 'a', kind: 'finish' }
+  ]
+  assert.deepEqual(filterLog(log, 'chat', 'a').map(e => e.at), [1, 3])
+  assert.deepEqual(filterLog(log, 'chat', null), [])
+  assert.equal(filterLog(log, 'all', 'a').length, 3)
 })
 
 // ── register(ctx) against fake host atoms ───────────────────────────────────

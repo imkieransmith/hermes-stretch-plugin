@@ -86,9 +86,15 @@ export function formatDuration(ms) {
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`
 }
 
+/** Session ids share long prefixes (e.g. "local…"), so show the distinctive tail. */
 export function shortId(id) {
   if (!id) return '—'
-  return id.length > 10 ? `${id.slice(0, 4)}…${id.slice(-4)}` : id
+  return id.length > 8 ? `…${id.slice(-6)}` : id
+}
+
+/** Log entries for the pane's scope: 'chat' = focused session only, 'all' = every session. */
+export function filterLog(log, scope, focusedId) {
+  return scope === 'all' ? log : log.filter(e => e.sessionId === focusedId)
 }
 
 function clock(ts) {
@@ -167,8 +173,35 @@ function Row({ label, value }) {
   })
 }
 
+/** Two-option text toggle (plain button: SegmentedControl's props aren't documented). */
+function ScopeToggle({ scope, setScope }) {
+  const opt = (value, label) =>
+    jsx(
+      'button',
+      {
+        type: 'button',
+        onClick: () => setScope(value),
+        'aria-pressed': scope === value,
+        style: {
+          background: 'none',
+          border: 'none',
+          padding: '0 2px',
+          cursor: 'pointer',
+          font: 'inherit',
+          color: scope === value ? 'var(--ui-text-secondary)' : 'var(--ui-text-quaternary)',
+          textDecoration: scope === value ? 'underline' : 'none',
+          textUnderlineOffset: 3
+        },
+        children: label
+      },
+      value
+    )
+  return jsxs('span', { style: { display: 'inline-flex', gap: 6 }, children: [opt('chat', 'this chat'), opt('all', 'all chats')] })
+}
+
 function ActivityPane({ $activity, $events, $bySession, clear }) {
   const { busy, focusedId, elapsed } = useFocusedStatus($activity)
+  const [scope, setScope] = useState('chat')
   const awaiting = useValue(host.state.awaitingResponse)
   const gateway = useValue(host.state.gateway)
   const bySession = useValue($bySession)
@@ -190,20 +223,26 @@ function ActivityPane({ $activity, $events, $bySession, clear }) {
   const facts = jsxs('div', {
     style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', columnGap: 24, rowGap: 2 },
     children: [
-      jsx(Row, { label: 'focused session', value: shortId(focusedId) }),
+      jsx(Row, { label: 'this chat', value: shortId(focusedId) }),
       jsx(Row, { label: 'awaiting response', value: String(awaiting) }),
       jsx(Row, { label: 'busy sessions', value: busyIds.length ? busyIds.map(shortId).join(', ') : 'none' }),
       jsx(Row, { label: 'gateway socket', value: String(gateway) })
     ]
   })
 
-  const log = activity.log.slice(-12).reverse()
+  const log = filterLog(activity.log, scope, focusedId).slice(-12).reverse()
   const turnLog = jsxs('div', {
     style: S.section,
     children: [
-      jsx('div', { style: { ...S.muted, marginBottom: 4 }, children: 'Turn transitions (newest first)' }),
+      jsxs('div', {
+        style: { ...S.muted, marginBottom: 4, display: 'flex', gap: 10 },
+        children: ['Turns (newest first) ·', jsx(ScopeToggle, { scope, setScope })]
+      }),
       log.length === 0
-        ? jsx('div', { style: S.faint, children: 'Nothing yet — send Hermes a message.' })
+        ? jsx('div', {
+            style: S.faint,
+            children: scope === 'all' ? 'Nothing yet — send Hermes a message.' : 'No turns in this chat yet.'
+          })
         : log.map((e, i) =>
             jsxs(
               'div',
@@ -214,7 +253,9 @@ function ActivityPane({ $activity, $events, $bySession, clear }) {
                   jsx('span', { children: e.kind === 'start' ? '▶ start ' : '■ finish' }),
                   jsx('span', { style: S.muted, children: shortId(e.sessionId) }),
                   e.kind === 'finish' ? jsx('span', { children: `after ${formatDuration(e.durationMs)}` }) : null,
-                  e.sessionId === focusedId ? jsx('span', { style: S.faint, children: '(focused)' }) : null
+                  scope === 'all' && e.sessionId === focusedId
+                    ? jsx('span', { style: S.faint, children: '(this chat)' })
+                    : null
                 ]
               },
               `${e.at}-${i}`

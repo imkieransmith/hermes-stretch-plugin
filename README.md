@@ -16,7 +16,8 @@ Nov 11 2026, 5 PM EST).
   you're looking at. Hover for the last turn's duration.
 - **"Stretch Break" pane**, docked below the conversation:
   - focused session id, `awaitingResponse`, busy sessions, gateway socket
-  - turn transitions per session (`▶ start` / `■ finish after 0:42`)
+  - turn transitions (`▶ start` / `■ finish after 0:42`), scoped to
+    **this chat** by default, or **all chats** (one app-wide log)
   - live gateway event counts and recent events (to plan Stages 2–3)
 - **⌘K → "Stretch Break: Clear activity log"**
 
