@@ -182,6 +182,10 @@ Keep the desktop half at `desktop/plugin.js`, **not** the repo root. A root
   plain JS (`renderCue`, adapted from tap-audio) and scheduled ahead on the
   audio clock; late beats are dropped, never bunched. Only start audio from
   our own buttons' clicks (`wakeSound`). No audio files, no network.
+- **Icons are Tabler** (Hermes's chrome set): use `icons.*` from the SDK
+  (only the names Hermes re-exports in `src/lib/icons.ts`). A Tabler icon not
+  in that list goes in as inline SVG copied from tabler.io (MIT), stroke
+  `currentColor`/theme vars. Don't mix in Codicon on the card.
 - **Exercises are data.** `NECK_TILT` and `BOX_BREATHING` are lists of timed
   steps (`{ ms, label, cue, pose, round }`) run by one routine engine
   (`idle → offer | prep → step(i) → done`) and drawn by one card. The

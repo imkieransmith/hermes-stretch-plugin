@@ -41,6 +41,7 @@ import {
   COMPOSER_AREAS,
   Button,
   Codicon,
+  icons,
   ListRow,
   SegmentedControl,
   Tip,
@@ -86,7 +87,7 @@ export const PLACEMENTS = [
  */
 export const DEV = { keepPaneOpen: true }
 /** DEV ONLY — bump on each change so a stale hot reload is obvious in the UI. */
-const DEV_BUILD = 'b18'
+const DEV_BUILD = 'b28'
 /** Exit animation length; the pane is unregistered when it completes. */
 export const EXIT_MS = 220
 const ENTER_MS = 280
@@ -522,6 +523,23 @@ export function displayCount(s, ex, now) {
   return Math.min(Math.ceil(total / 1000), Math.floor(elapsed / 1000) + 1)
 }
 
+/**
+ * The big number, zero-padded to the exercise's widest value so it never
+ * changes width, from get ready through every step: the neck stretch runs
+ * 03 02 01, 20 … 09 … 01, 04 … 01; box breathing (never past 4) stays 3 2 1,
+ * 1 2 3 4. `pad` is the leading zeros (drawn dimmed), `digits` the number.
+ */
+export function countParts(s, ex, now) {
+  const widest = Math.max(PREP_MS, ...ex.steps.map(st => st.ms)) / 1000
+  const digits = String(displayCount(s, ex, now))
+  return { pad: '0'.repeat(Math.max(0, String(Math.ceil(widest)).length - digits.length)), digits }
+}
+
+export function countText(s, ex, now) {
+  const { pad, digits } = countParts(s, ex, now)
+  return pad + digits
+}
+
 /** 0 → 1 through the current phase. */
 export function phaseProgress(s, ex, now) {
   const total = phaseDurationMs(s, ex)
@@ -865,6 +883,9 @@ function clock(ts) {
 
 const S = {
   muted: { color: 'var(--ui-text-tertiary)' },
+  /** Supporting text on the card. Secondary, not tertiary: tertiary is ~3.4:1
+   *  on the light theme, under WCAG AA's 4.5:1 for small text; this is ~6:1. */
+  sub: { color: 'var(--ui-text-secondary)' },
   faint: { color: 'var(--ui-text-quaternary)' },
   mono: { fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
   section: { borderTop: '1px solid var(--ui-stroke-tertiary)', paddingTop: 8 }
@@ -946,6 +967,15 @@ function Row({ label, value }) {
 /** Quiet inline action ("Skip", "Not now"): core Button, `text` variant (DESIGN.md). */
 function TextButton({ onClick, children }) {
   return jsx(Button, { variant: 'text', size: 'inline', onClick, children })
+}
+
+/**
+ * Secondary actions on the card ("Skip", "Not now", "Close"): core Button,
+ * `outline` variant. Not `text`: that's tertiary grey (~3.4:1 on the light
+ * theme, under WCAG AA); outline uses primary text (DESIGN.md variants).
+ */
+function QuietButton({ onClick, size, children }) {
+  return jsx(Button, { variant: 'outline', size, onClick, children })
 }
 
 /** Small either/or choice: core SegmentedControl. `options` = [[id, label], …]. */
@@ -1079,7 +1109,9 @@ function useWidth(ref) {
   return width
 }
 
-const STEP_ENTER_MS = 280
+const STEP_ENTER_MS = 250
+/** Even, symmetric fade (sine-like): no burst at the start like EASE_OUT. */
+const STEP_ENTER_EASE = 'cubic-bezier(0.37, 0, 0.63, 1)'
 
 /**
  * A new step arriving: our own element fades in when `key` changes (not on
@@ -1096,7 +1128,7 @@ function useEnterOnChange(ref, key) {
     if (!el || typeof el.animate !== 'function' || prefersReducedMotion()) return undefined
     const anim = el.animate([{ opacity: 0 }, { opacity: 1 }], {
       duration: STEP_ENTER_MS,
-      easing: EASE_OUT
+      easing: STEP_ENTER_EASE
     })
     return () => anim.cancel()
   }, [key])
@@ -1182,7 +1214,7 @@ function RoutineBar({ s, ex, now }) {
               ? jsx('span', {
                   style: {
                     fontSize: 12,
-                    color: seg.round === current ? 'var(--ui-text-secondary)' : 'var(--ui-text-tertiary)',
+                    color: seg.round === current ? 'var(--ui-text-primary)' : 'var(--ui-text-secondary)',
                     whiteSpace: 'nowrap'
                   },
                   children: ex.rounds[seg.round]
@@ -1211,19 +1243,19 @@ function StretchCompact({ model, s }) {
       style: { display: 'flex', alignItems: 'center', gap: 8, maxWidth: 320 },
       children: [
         jsx(Bar, { fill: phaseProgress(s, ex, now), height: 3 }),
-        jsx('span', { style: { ...S.muted, ...S.mono, fontSize: 11, whiteSpace: 'nowrap' }, children: `starts in ${left} s` })
+        jsx('span', { style: { ...S.sub, ...S.mono, fontSize: 11, whiteSpace: 'nowrap' }, children: `starts in ${left} s` })
       ]
     })
     actions = [
       jsx(Button, { size: 'sm', onClick: a.skipStretch, children: 'Start now' }, 'go'),
-      jsx(TextButton, { onClick: a.notNow, children: 'Not now' }, 'no')
+      jsx(QuietButton, { size: 'sm', onClick: a.notNow, children: 'Not now' }, 'no')
     ]
   } else {
     heading = ui.offered ? ex.offerHeading : ex.name
     sub = ui.offered ? `${ex.name} · ${about}` : `${ex.summary} ${about}.`
     actions = [
       jsx(Button, { size: 'sm', onClick: a.startStretch, children: 'Start' }, 'go'),
-      jsx(TextButton, { onClick: a.notNow, children: ui.offered ? 'Not now' : 'Hide' }, 'no')
+      jsx(QuietButton, { size: 'sm', onClick: a.notNow, children: ui.offered ? 'Not now' : 'Hide' }, 'no')
     ]
   }
 
@@ -1232,46 +1264,60 @@ function StretchCompact({ model, s }) {
     children: [
       jsx(Figure, { pose: ex.steps[0].pose, size: THUMB_PX }),
       jsxs('div', {
-        style: { flex: '1 1 220px', minWidth: 0, display: 'grid', gap: 3 },
+        style: { flex: '1 1 220px', minWidth: 0, display: 'grid', alignContent: 'center', gap: 2 },
         children: [
-          jsxs('div', {
-            style: { display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 },
-            children: [
-              jsx('span', { style: { fontSize: 13, fontWeight: 600, color: 'var(--ui-text-primary)', whiteSpace: 'nowrap' }, children: heading }),
-              jsx('span', {
-                style: { ...S.muted, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-                children: sub
-              })
-            ]
+          jsx('div', {
+            style: { fontSize: 13, fontWeight: 600, color: 'var(--ui-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+            children: heading
           }),
-          bar
+          jsx('div', {
+            style: { ...S.sub, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+            children: sub
+          }),
+          bar ? jsx('div', { style: { marginTop: 4 }, children: bar }) : null
         ]
       }),
       jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', gap: 12, flex: 'none', marginLeft: 'auto' },
+        style: { display: 'flex', alignItems: 'center', gap: 8, flex: 'none', marginLeft: 'auto' },
         children: actions
       })
     ]
   })
 }
 
-/** While an exercise runs: figure, big countdown, routine bar, cue, controls. */
-/** Mute toggle, top right of the card (unlabelled icon, so it gets a Tip). */
+/**
+ * One icon size and weight for the whole card: 20 px (Hermes's `iconSize.lg`)
+ * at Tabler's own 2 px stroke (on its 24 px grid, so ~1.7 px drawn). Sized
+ * with an inline style: buttons shrink any unsized svg to 12-14 px.
+ */
+const ICON_PX = 20
+const ICON_STROKE = 2
+const iconStyle = { width: ICON_PX, height: ICON_PX, flex: 'none' }
+
+/**
+ * Mute toggle, top right of the card (unlabelled icon, so it gets a Tip).
+ * Tabler like the rest of the card (`icons.Volume2` / `icons.VolumeX`).
+ * Codicon only if a Hermes build lacks `icons`.
+ */
 function SoundToggle({ model }) {
   const on = useValue(model.$settings).soundOn
   const label = on ? 'Mute sounds' : 'Turn sounds on'
+  const Icon = icons && (on ? icons.Volume2 : icons.VolumeX)
   return jsx(Tip, {
     label,
     children: jsx(Button, {
       variant: 'ghost',
-      size: 'icon-xs',
+      size: 'icon-sm',
       'aria-label': label,
       onClick: model.actions.toggleSound,
-      children: jsx(Codicon, { name: on ? 'unmute' : 'mute' })
+      children: Icon
+        ? jsx(Icon, { 'aria-hidden': 'true', size: ICON_PX, stroke: ICON_STROKE, style: iconStyle })
+        : jsx(Codicon, { name: on ? 'unmute' : 'mute', size: `${ICON_PX}px` })
     })
   })
 }
 
+/** While an exercise runs: figure, big countdown, routine bar, cue, controls. */
 function StretchLarge({ model, s, now, wide }) {
   const ex = exerciseOf(s)
   const a = model.actions
@@ -1281,6 +1327,7 @@ function StretchLarge({ model, s, now, wide }) {
   // Each new step eases in: the countdown + its caption, and the cue (only
   // when the words actually change).
   const stepKey = `${s.phase}:${s.step}`
+  const count = countParts(s, ex, now)
   const countRef = useRef(null)
   const cueRef = useRef(null)
   useEnterOnChange(countRef, stepKey)
@@ -1295,16 +1342,10 @@ function StretchLarge({ model, s, now, wide }) {
     style: { flex: '1 1 260px', minWidth: 0, display: 'grid', alignContent: 'center', gap: 10 },
     children: [
       jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', gap: 8 },
+        style: { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '2px 10px' },
         children: [
-          jsxs('div', {
-            style: { flex: 1, minWidth: 0, display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '2px 10px' },
-            children: [
-              jsx('span', { style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' }, children: ex.name }),
-              jsx('span', { style: { ...S.muted, fontSize: 13 }, children: ex.roundText(currentRound(s, ex)) })
-            ]
-          }),
-          jsx(SoundToggle, { model })
+          jsx('span', { style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' }, children: ex.name }),
+          jsx('span', { style: { ...S.sub, fontSize: 13 }, children: ex.roundText(currentRound(s, ex)) })
         ]
       }),
       jsxs('div', {
@@ -1320,19 +1361,22 @@ function StretchLarge({ model, s, now, wide }) {
               color: 'var(--ui-text-primary)',
               opacity: paused ? 0.45 : 1
             },
-            children: displayCount(s, ex, now)
+            children: [
+              count.pad ? jsx('span', { 'aria-hidden': 'true', style: { color: 'var(--ui-text-quaternary)' }, children: count.pad }) : null,
+              count.digits
+            ]
           }),
-          jsx('span', { style: { ...S.muted, fontSize: 13 }, children: paused ? 'paused' : step ? step.label : 'get ready' })
+          jsx('span', { style: { ...S.sub, fontSize: 13 }, children: paused ? 'paused' : step ? step.label : 'get ready' })
         ]
       }),
       jsx(RoutineBar, { s, ex, now }),
       jsx('div', { ref: cueRef, style: { fontSize: 14, color: 'var(--ui-text-secondary)', lineHeight: 1.45 }, children: cue }),
       jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', gap: 14 },
+        style: { display: 'flex', alignItems: 'center', gap: 8 },
         children: [
           jsx(Button, { variant: 'secondary', onClick: paused ? a.resumeStretch : a.pauseStretch, children: paused ? 'Resume' : 'Pause' }),
-          jsx(TextButton, { onClick: a.skipStretch, children: 'Skip' }),
-          jsx(TextButton, { onClick: a.stopStretch, children: 'Stop' })
+          jsx(QuietButton, { onClick: a.skipStretch, children: 'Skip' }),
+          jsx(QuietButton, { onClick: a.stopStretch, children: 'Stop' })
         ]
       })
     ]
@@ -1344,20 +1388,26 @@ function StretchLarge({ model, s, now, wide }) {
   })
 }
 
-/** A tick in a ring, in the accent colour. */
-function Tick({ size = 28 }) {
+/**
+ * A tick in a ring, in the accent colour: the app's own icon (Tabler
+ * IconCircleCheck, `icons.CheckCircle2` in the SDK). Falls back to the same
+ * shape drawn inline if a Hermes build doesn't export `icons`.
+ */
+function Tick() {
+  const Icon = icons && icons.CheckCircle2
+  if (Icon) return jsx(Icon, { 'aria-hidden': 'true', size: ICON_PX, stroke: ICON_STROKE, color: 'var(--ui-accent)', style: iconStyle })
   return jsxs('svg', {
     'aria-hidden': 'true',
-    width: size,
-    height: size,
+    width: ICON_PX,
+    height: ICON_PX,
     viewBox: '0 0 24 24',
     fill: 'none',
     stroke: 'var(--ui-accent)',
-    strokeWidth: 1.75,
+    strokeWidth: ICON_STROKE,
     strokeLinecap: 'round',
     strokeLinejoin: 'round',
-    style: { flex: 'none' },
-    children: [jsx('circle', { cx: 12, cy: 12, r: 10.5 }), jsx('path', { d: 'M7.5 12.5l3 3 6-6.5' })]
+    style: iconStyle,
+    children: [jsx('circle', { cx: 12, cy: 12, r: 9 }), jsx('path', { d: 'M9 12l2 2l4 -4' })]
   })
 }
 
@@ -1382,14 +1432,13 @@ function StretchDone({ model, s, wide }) {
             children: [
               jsx(Tick, {}),
               jsx('span', {
-                style: { flex: 1, minWidth: 0, fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' },
+                style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' },
                 children: 'Well done, you did it'
-              }),
-              jsx(SoundToggle, { model })
+              })
             ]
           }),
           jsx('div', { style: { fontSize: 14, color: 'var(--ui-text-secondary)', lineHeight: 1.45 }, children: ex.doneText }),
-          jsx('div', { children: jsx(TextButton, { onClick: model.actions.dismissDone, children: 'Close' }) })
+          jsx('div', { children: jsx(QuietButton, { onClick: model.actions.dismissDone, children: 'Close' }) })
         ]
       })
     ]
@@ -1413,15 +1462,20 @@ function StretchBody({ model }) {
   // 100 ms keeps each second of the countdown even (≤ 0.1 s late).
   useTicker(isTimed(s) && s.pausedAt == null, 100)
   useFadeOnChange(ref, layout)
-  return jsx('div', {
+  // The mute toggle is pinned to the top-right corner for the exercise and
+  // well-done views (the compact offer plays no sound, so it has none).
+  const corner = layout !== 'compact'
+  return jsxs('div', {
     ref,
-    style: { width: '100%', fontSize: 12 },
-    children:
+    style: { position: 'relative', width: '100%', fontSize: 12, paddingRight: corner ? 40 : 0, boxSizing: 'border-box' },
+    children: [
       layout === 'done'
         ? jsx(StretchDone, { model, s, wide })
         : layout === 'large'
           ? jsx(StretchLarge, { model, s, now, wide })
-          : jsx(StretchCompact, { model, s })
+          : jsx(StretchCompact, { model, s }),
+      corner ? jsx('div', { style: { position: 'absolute', top: 0, right: 0 }, children: jsx(SoundToggle, { model }) }) : null
+    ]
   })
 }
 

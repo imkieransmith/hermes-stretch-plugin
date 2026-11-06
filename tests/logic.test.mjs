@@ -15,6 +15,8 @@ import plugin, {
   NECK_TILT,
   currentRound,
   displayCount,
+  countText,
+  countParts,
   LAST_TICKS,
   SOUND_CUES,
   SOUND_PEAK,
@@ -554,3 +556,17 @@ test('createSound: late beats are dropped, not bunched; inert without Web Audio'
   assert.deepEqual(none.scheduled(), [])
 })
 
+test('countText: pads to the exercise width, so the number never changes width', () => {
+  const st = startRoutine(NECK_TILT, 0)
+  assert.equal(countText(st, NECK_TILT, 0), '03', 'get ready matches the 20 s holds')
+  assert.deepEqual(countParts(st, NECK_TILT, 0), { pad: '0', digits: '3' })
+  const hold = tickRoutine(st, NECK_TILT, PREP_MS)
+  assert.equal(countText(hold, NECK_TILT, PREP_MS), '20')
+  assert.equal(countText(hold, NECK_TILT, PREP_MS + 11_500), '09')
+  assert.equal(countText(hold, NECK_TILT, PREP_MS + 19_900), '01')
+  const rest = tickRoutine(hold, NECK_TILT, PREP_MS + 20_000)
+  assert.equal(countText(rest, NECK_TILT, PREP_MS + 20_000), '04', 'switch sides')
+  assert.equal(countText(startRoutine(BOX_BREATHING, 0), BOX_BREATHING, 0), '3', 'breathing never needs two digits')
+  const breath = tickRoutine(startRoutine(BOX_BREATHING, 0), BOX_BREATHING, PREP_MS)
+  assert.equal(countText(breath, BOX_BREATHING, PREP_MS + 2_500), '3')
+})
