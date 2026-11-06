@@ -51,6 +51,7 @@ export const COMPOSER_AREAS = {
 }
 export const Button = () => null
 export const Tip = ({ children }) => children
+export const Codicon = () => null
 export const ListRow = () => null
 export const ToggleRow = () => null
 export const SegmentedControl = () => null

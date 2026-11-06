@@ -176,6 +176,12 @@ Keep the desktop half at `desktop/plugin.js`, **not** the repo root. A root
   the pane and its transitions, and why the other placements were dropped,
   is in `docs/notes/bottom-pane-and-placements.md`. Both surfaces share the
   lifecycle below.
+- **Sound is one player in `register()`** (`createSound`), driven by
+  `soundPlan(routine, exercise)`: never play sounds from a component (split
+  view renders the card more than once). Cues are rendered once to samples in
+  plain JS (`renderCue`, adapted from tap-audio) and scheduled ahead on the
+  audio clock; late beats are dropped, never bunched. Only start audio from
+  our own buttons' clicks (`wakeSound`). No audio files, no network.
 - **Exercises are data.** `NECK_TILT` and `BOX_BREATHING` are lists of timed
   steps (`{ ms, label, cue, pose, round }`) run by one routine engine
   (`idle → offer | prep → step(i) → done`) and drawn by one card. The

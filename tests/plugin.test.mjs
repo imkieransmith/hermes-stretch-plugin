@@ -346,7 +346,7 @@ test('render: chip, every pane phase, debug view and settings page render', () =
   actions.setView('debug')
   pane()
   renderTree(ctx.settingsPages[0].render(), seen)
-  for (const name of ['StatusChip', 'Dot', 'StretchPane', 'StretchBody', 'StretchCompact', 'StretchLarge', 'RoutineBar', 'Bar', 'Figure', 'StretchDone', 'Tick', 'DebugView', 'SettingsPage']) {
+  for (const name of ['StatusChip', 'Dot', 'StretchPane', 'StretchBody', 'StretchCompact', 'StretchLarge', 'RoutineBar', 'Bar', 'Figure', 'StretchDone', 'Tick', 'SoundToggle', 'DebugView', 'SettingsPage']) {
     assert.ok(seen.includes(name), `rendered ${name}`)
   }
   ctx.dispose()
@@ -600,6 +600,21 @@ test('card: draws the step that is actually running, even before the driver tick
   assert.ok(shown.includes('hold'), 'already on the next step')
   assert.ok(shown.includes('1'), 'counting up from 1')
   assert.ok(!shown.includes('0'), 'never a 0')
+  ctx.dispose()
+})
+
+test('sound: on by default; the card toggle mutes, persists, and turns back on', () => {
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { $settings, actions } = modelOf(ctx)
+  assert.equal($settings.get().soundOn, true)
+  actions.toggleSound()
+  assert.equal($settings.get().soundOn, false)
+  assert.equal(ctx.stored().settings.soundOn, false, 'saved')
+  actions.startStretch() // no Web Audio in Node: must not throw
+  ctx.advance(5_000)
+  actions.toggleSound()
+  assert.equal($settings.get().soundOn, true)
   ctx.dispose()
 })
 

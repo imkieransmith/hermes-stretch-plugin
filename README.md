@@ -53,11 +53,18 @@ Nov 11 2026, 5 PM EST).
   - Code blocks, inline code, quoted lines, indented (pasted) lines, links
     and file paths are ignored, so swearing in a pasted log doesn't count.
   - Only messages sent from Desktop's input box are checked.
+- **Sound** (on by default; speaker button at the top right of the card, or
+  Settings): get ready and switch sides tick 3, 2, 1 with a light "not
+  yet" tick; each new stretch side and each breath's 1 gets a soft marimba
+  note; breathing's 2, 3, 4 and a hold's last 3 seconds get a wooden tick; a
+  soft chime when you finish. Nothing plays for an offer you didn't start. The sounds are
+  generated in `plugin.js` (no audio files, nothing downloaded).
 - **Settings ▸ Plugins ▸ Stretch Break**:
   - Offer stretch breaks (on/off)
   - Offer after (10/20/30/60 s)
   - Start automatically (on/off)
   - Offer a breather when things get tense (on/off, default on)
+  - Play sounds (on/off, default on)
   - Time between breaks (none/10/20/30/45 min)
 - **⌘K**: "Stretch Break: Toggle panel", "Start a stretch", "Start box
   breathing", "Pause / resume stretch offers", "Open settings", "Show debug

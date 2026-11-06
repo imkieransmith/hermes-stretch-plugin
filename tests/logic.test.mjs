@@ -15,6 +15,12 @@ import plugin, {
   NECK_TILT,
   currentRound,
   displayCount,
+  LAST_TICKS,
+  SOUND_CUES,
+  SOUND_PEAK,
+  createSound,
+  renderCue,
+  soundPlan,
   displaySeconds,
   exerciseOf,
   routineSeconds,
@@ -394,5 +400,157 @@ test('count: breathing counts up 1 … 4; stretches and get-ready count down', (
   const hold = tickRoutine(startRoutine(NECK_TILT, 0), NECK_TILT, PREP_MS)
   assert.equal(displayCount(hold, NECK_TILT, PREP_MS), 20, 'stretch hold counts down')
   assert.equal(displayCount(hold, NECK_TILT, PREP_MS + 19_500), 1)
+})
+
+// ── sound ───────────────────────────────────────────────────────────────────
+
+test('sound cues render clean: finite, at their level, end on silence, same every time', () => {
+  for (const rate of [44_100, 48_000]) {
+    for (const [name, recipe] of Object.entries(SOUND_CUES)) {
+      const x = renderCue(recipe, rate)
+      let peak = 0
+      for (const v of x) {
+        assert.ok(Number.isFinite(v), name)
+        peak = Math.max(peak, Math.abs(v))
+      }
+      const want = SOUND_PEAK * 10 ** ((recipe.level ?? 0) / 20)
+      assert.ok(Math.abs(peak - want) < 1e-6, `${name} peaks at its level`)
+      assert.ok(x[x.length - 1] === 0, `${name} ends on silence`)
+      assert.ok(x.length / rate < 2, `${name} is short`)
+    }
+  }
+  assert.deepEqual(renderCue(SOUND_CUES.tick, 48_000), renderCue(SOUND_CUES.tick, 48_000))
+})
+
+test('soundPlan: breathing: ready 3-2-1, then go on each 1 and tick on 2, 3, 4; ends on a chime', () => {
+  const ex = BOX_BREATHING
+  const plan = soundPlan(startRoutine(ex, 0), ex)
+  assert.deepEqual(
+    plan.slice(0, 8).map(b => b.cue),
+    ['ready', 'ready', 'ready', 'go', 'tick', 'tick', 'tick', 'go']
+  )
+  const beats = plan.filter(b => b.cue !== 'chime').map(b => b.at)
+  assert.equal(beats.length, LAST_TICKS + 16 * 4)
+  const gaps = new Set(beats.slice(1).map((t, i) => t - beats[i]))
+  assert.deepEqual([...gaps], [1_000], 'one even beat throughout')
+  const total = PREP_MS + ex.steps.reduce((n, st) => n + st.ms, 0)
+  assert.deepEqual(plan[plan.length - 1], { at: total, cue: 'chime' })
+})
+
+test('soundPlan: stretch: ready on get ready and switch sides, go as each side starts, ticks to finish it', () => {
+  const ex = NECK_TILT
+  const plan = soundPlan(startRoutine(ex, 0), ex)
+  const [hold, rest] = [ex.steps[0].ms, ex.steps[1].ms]
+  const last3 = (end, cue) => [3, 2, 1].map(k => ({ at: end - k * 1_000, cue }))
+  const left = PREP_MS
+  const right = PREP_MS + hold + rest
+  assert.deepEqual(plan, [
+    ...last3(PREP_MS, 'ready'),
+    { at: left, cue: 'go' },
+    ...last3(left + hold, 'tick'),
+    ...last3(right, 'ready'),
+    { at: right, cue: 'go' },
+    ...last3(right + hold, 'tick'),
+    { at: right + hold, cue: 'chime' }
+  ])
+})
+
+test('soundPlan: mid-step starts from that step; nothing paused, offered or idle', () => {
+  const ex = BOX_BREATHING
+  const s = tickRoutine(startRoutine(ex, 0), ex, PREP_MS + 5_000) // step 1 (hold), started at 7 s
+  assert.equal(s.step, 1)
+  assert.equal(soundPlan(s, ex)[0].at, PREP_MS + 4_000)
+  assert.deepEqual(soundPlan(pauseRoutine(s, PREP_MS + 5_000), ex), [])
+  assert.deepEqual(soundPlan(offerRoutine(ex, 0), ex), [])
+  assert.deepEqual(soundPlan(idleRoutine(ex), ex), [])
+})
+
+/** A tiny stand-in for Web Audio: records start/stop on the audio clock. */
+function fakeAudio() {
+  const log = []
+  class Param {
+    setTargetAtTime() {}
+  }
+  class Node {
+    connect(n) {
+      return n
+    }
+    disconnect() {}
+  }
+  class FakeContext {
+    constructor() {
+      this.state = 'running'
+      this.currentTime = 100
+      this.sampleRate = 8_000
+      this.destination = new Node()
+    }
+    createGain() {
+      return Object.assign(new Node(), { gain: new Param() })
+    }
+    createBuffer(_c, length) {
+      return { length, copyToChannel() {} }
+    }
+    createBufferSource() {
+      const src = Object.assign(new Node(), {
+        start: t => log.push(['start', t]),
+        stop: () => {
+          src.stopped = true
+          log.push(['stop'])
+        }
+      })
+      return src
+    }
+    resume() {
+      return Promise.resolve()
+    }
+    close() {
+      return Promise.resolve()
+    }
+  }
+  return { Ctor: FakeContext, log }
+}
+
+test('createSound: schedules ahead on the audio clock; a step moving on keeps the schedule', () => {
+  const { Ctor, log } = fakeAudio()
+  let t = 0
+  const sound = createSound({ Ctor, now: () => t })
+  const ex = BOX_BREATHING
+  let s = startRoutine(ex, 0)
+  sound.sync(soundPlan(s, ex))
+  const first = sound.scheduled()
+  assert.equal(first.length, LAST_TICKS + 64 + 1)
+  assert.deepEqual(log.slice(0, 2), [['start', 100], ['start', 101]], 'beat at t+1 s → audio clock +1 s')
+
+  t = PREP_MS + 50 // the driver notices the get-ready ended
+  s = tickRoutine(s, ex, t)
+  const before = log.length
+  sound.sync(soundPlan(s, ex))
+  assert.equal(log.length, before, 'nothing cancelled or re-added')
+
+  s = pauseRoutine(s, t)
+  sound.sync(soundPlan(s, ex))
+  assert.ok(log.some(([k]) => k === 'stop'), 'pause cancels what has not started')
+  assert.ok(sound.scheduled().every(k => Number(k.split('@')[1]) <= t), 'only started beats remain')
+
+  t += 10_000
+  s = resumeRoutine(s, t)
+  sound.sync(soundPlan(s, ex))
+  assert.ok(sound.scheduled().some(k => Number(k.split('@')[1]) > t), 'resume schedules the rest')
+
+  sound.silence()
+  assert.deepEqual(sound.scheduled(), [], 'mute drops everything')
+  sound.close()
+})
+
+test('createSound: late beats are dropped, not bunched; inert without Web Audio', () => {
+  const { Ctor, log } = fakeAudio()
+  const sound = createSound({ Ctor, now: () => 10_000 })
+  sound.sync([{ at: 1_000, cue: 'tick' }, { at: 9_980, cue: 'tick' }, { at: 11_000, cue: 'chime' }])
+  assert.deepEqual(sound.scheduled(), ['tick@9980', 'chime@11000'])
+  assert.deepEqual(log[0], ['start', 100], 'a few ms late plays now')
+  const none = createSound({ Ctor: undefined })
+  none.sync([{ at: 0, cue: 'tick' }])
+  none.wake()
+  assert.deepEqual(none.scheduled(), [])
 })
 

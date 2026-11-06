@@ -40,6 +40,7 @@ import {
   PALETTE_AREA,
   COMPOSER_AREAS,
   Button,
+  Codicon,
   ListRow,
   SegmentedControl,
   Tip,
@@ -85,7 +86,7 @@ export const PLACEMENTS = [
  */
 export const DEV = { keepPaneOpen: true }
 /** DEV ONLY — bump on each change so a stale hot reload is obvious in the UI. */
-const DEV_BUILD = 'b16'
+const DEV_BUILD = 'b18'
 /** Exit animation length; the pane is unregistered when it completes. */
 export const EXIT_MS = 220
 const ENTER_MS = 280
@@ -185,6 +186,8 @@ export const DEFAULT_SETTINGS = {
   cooldownMin: 20,
   /** Offer box breathing when your messages get tense (checked on this device). */
   breathersEnabled: true,
+  /** Soft ticks to count along with, and a chime at the end. */
+  soundOn: true,
   /** PROTOTYPE: which surface shows the stretch (see PLACEMENTS). */
   placement: 'below'
 }
@@ -195,7 +198,7 @@ export const COOLDOWN_CHOICES = [0, 10, 20, 30, 45]
 export function normalizeSettings(raw) {
   const s = { ...DEFAULT_SETTINGS }
   if (!raw || typeof raw !== 'object') return s
-  for (const key of ['offersEnabled', 'autoStart', 'breathersEnabled']) if (typeof raw[key] === 'boolean') s[key] = raw[key]
+  for (const key of ['offersEnabled', 'autoStart', 'breathersEnabled', 'soundOn']) if (typeof raw[key] === 'boolean') s[key] = raw[key]
   for (const key of ['offerDelaySec', 'cooldownMin']) {
     const n = raw[key]
     if (typeof n === 'number' && Number.isFinite(n) && n >= 0) s[key] = n
@@ -369,6 +372,8 @@ export const OFFER_MS = 5_000
  *     pose   what the figure shows during the step
  *     round  index into `rounds` (bar segment + "Rep 1 of 2"); null = an
  *            in-between step (a rest) with its own unlabelled bar segment
+ *     between  true = a get-ready between rounds ("switch sides"): it
+ *            sounds like the get-ready, not like a stretch
  *   rounds: bar labels, one per round (null = no label row)
  *   count:  how the big number runs during steps: 'down' (time left, the
  *           default) or 'up' (a breathing pace: 1, 2, 3, 4)
@@ -387,7 +392,7 @@ export const NECK_TILT = {
   roundText: i => `Rep ${i + 1} of 2 · ${['Left', 'Right'][i]} side`,
   steps: [
     { ms: 20_000, label: 'seconds left', pose: 'left', round: 0, cue: 'Let your head tilt toward your left shoulder. Don’t pull it.' },
-    { ms: REST_MS, label: 'switch sides', pose: 'centre', round: null, cue: 'Slowly bring your head back to centre. Next: right side.' },
+    { ms: REST_MS, label: 'switch sides', pose: 'centre', round: null, between: true, cue: 'Slowly bring your head back to centre. Next: right side.' },
     { ms: 20_000, label: 'seconds left', pose: 'right', round: 1, cue: 'Let your head tilt toward your right shoulder. Don’t pull it.' }
   ]
 }
@@ -558,6 +563,296 @@ export function routineSegments(s, ex, now) {
     } else out.push({ round: st.round, weight: st.ms, filled: fill * st.ms })
   })
   return out.map(({ round, weight, filled }) => ({ round, weight, fill: filled / weight }))
+}
+
+// ── Sound ───────────────────────────────────────────────────────────────────
+// Adapted from tap-audio (Nonobound), which replaced cuelume there. cuelume
+// builds every play from live Web Audio nodes timed on the audio clock, so a
+// late start can skip a click's first few ms (most of what you hear): thin,
+// quiet or missing taps. Here each cue is rendered ONCE to samples in plain
+// JS, normalised to a fixed peak, and every play is that clip from sample 0.
+// Beats are scheduled ahead on the audio clock, so the count stays even even
+// if the window's timers are throttled. No files, no network.
+
+/** Every cue peaks here (−12 dBFS) before its own `level` (dB). */
+export const SOUND_PEAK = 10 ** (-12 / 20)
+
+/**
+ * The cues. A layer is a sine (`tone`, Hz) or filtered noise (`noise` +
+ * `hz`, `q`); it rises over `attack` s, then falls 60 dB over `decay` s.
+ * `to` + `glide` slide the pitch, `at` delays the layer.
+ */
+export const SOUND_CUES = {
+  /** One count: a small soft wooden tock, quieter than a button. */
+  tick: {
+    level: -4,
+    layers: [
+      { noise: 'bandpass', hz: 2600, q: 1.4, peak: 0.3, attack: 0.0005, decay: 0.006 },
+      { tone: 600, to: 420, glide: 0.015, peak: 1, attack: 0.001, decay: 0.07 },
+      { tone: 1260, peak: 0.08, attack: 0.001, decay: 0.05 }
+    ]
+  },
+  /** Get ready / switch sides: a lighter, higher tik, so it reads as "not yet". */
+  ready: {
+    level: -7,
+    layers: [
+      { noise: 'bandpass', hz: 4200, q: 2, peak: 0.35, attack: 0.0005, decay: 0.005 },
+      { tone: 1480, to: 1320, glide: 0.01, peak: 1, attack: 0.001, decay: 0.035 },
+      { tone: 2960, peak: 0.1, attack: 0.001, decay: 0.02 }
+    ]
+  },
+  /** The first second of a step ("go" / each breath's 1): a soft marimba note. */
+  go: {
+    level: -3,
+    layers: [
+      { noise: 'lowpass', hz: 1400, q: 0.7, peak: 0.2, attack: 0.001, decay: 0.005 },
+      { tone: 659.25, peak: 1, attack: 0.003, decay: 0.32 },
+      { tone: 659.25 * 3.99, peak: 0.12, attack: 0.003, decay: 0.08 }
+    ]
+  },
+  /** Finished: two soft bell notes rising a fifth, ringing out. */
+  chime: {
+    level: -3,
+    layers: [
+      { noise: 'lowpass', hz: 1500, q: 0.7, peak: 0.15, attack: 0.001, decay: 0.006 },
+      { tone: 523.25, peak: 1, attack: 0.003, decay: 0.9 },
+      { tone: 523.25 * 2.76, peak: 0.12, attack: 0.003, decay: 0.3 },
+      { tone: 783.99, peak: 0.85, attack: 0.003, decay: 1.1, at: 0.14 },
+      { tone: 783.99 * 2.76, peak: 0.08, attack: 0.003, decay: 0.3, at: 0.14 }
+    ]
+  }
+}
+
+const SOUND_TAIL_S = 0.002
+const SOUND_RETUNE = 32
+
+/** Render a cue to mono samples at `rate`, peaking at SOUND_PEAK + level. */
+export function renderCue(recipe, rate) {
+  const endOf = l => (l.at ?? 0) + l.attack + l.decay
+  const length = Math.ceil(Math.max(...recipe.layers.map(endOf)) * rate)
+  const out = new Float32Array(length)
+  recipe.layers.forEach((layer, n) => addCueLayer(out, layer, rate, 1 + n))
+  const fade = Math.min(length, Math.ceil(SOUND_TAIL_S * rate))
+  for (let i = 0; i < fade; i++) out[length - 1 - i] *= i / fade
+  let peak = 0
+  for (const x of out) peak = Math.max(peak, Math.abs(x))
+  const scale = peak ? (SOUND_PEAK * 10 ** ((recipe.level ?? 0) / 20)) / peak : 0
+  for (let i = 0; i < length; i++) out[i] *= scale
+  return out
+}
+
+function addCueLayer(out, layer, rate, seed) {
+  const start = Math.round((layer.at ?? 0) * rate)
+  const length = Math.min(out.length - start, Math.ceil((layer.attack + layer.decay) * rate))
+  const tau = layer.decay / Math.log(1000) // 60 dB over `decay`
+  const from = layer.tone ?? layer.hz
+  const glide = layer.glide ?? layer.attack + layer.decay
+  const hzAt = t => (layer.to === undefined ? from : from * (layer.to / from) ** Math.min(1, t / glide))
+  const random = seededRandom(seed)
+  const filter = layer.noise ? biquad(layer.noise, layer.q ?? 1) : null
+  let phase = 0
+  for (let i = 0; i < length; i++) {
+    const t = i / rate
+    const level = t < layer.attack ? layer.peak * (t / layer.attack) : layer.peak * Math.exp(-(t - layer.attack) / tau)
+    let x
+    if (filter) {
+      if (i % SOUND_RETUNE === 0) filter.tune(hzAt(t), rate)
+      x = filter.step(random() * 2 - 1)
+    } else {
+      x = Math.sin(phase)
+      phase += (2 * Math.PI * hzAt(t)) / rate
+    }
+    out[start + i] += x * level
+  }
+}
+
+/** Two-pole filter (Audio EQ Cookbook, as BiquadFilterNode), retunable. */
+function biquad(type, q) {
+  let b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0
+  return {
+    tune(hz, rate) {
+      const w = (2 * Math.PI * Math.min(hz, rate * 0.45)) / rate
+      const cos = Math.cos(w)
+      const alpha = Math.sin(w) / (2 * q)
+      const a0 = 1 + alpha
+      if (type === 'bandpass') [b0, b1, b2] = [alpha, 0, -alpha]
+      else if (type === 'lowpass') [b0, b1, b2] = [(1 - cos) / 2, 1 - cos, (1 - cos) / 2]
+      else [b0, b1, b2] = [(1 + cos) / 2, -(1 + cos), (1 + cos) / 2]
+      ;[b0, b1, b2] = [b0 / a0, b1 / a0, b2 / a0]
+      ;[a1, a2] = [(-2 * cos) / a0, (1 - alpha) / a0]
+    },
+    step(x) {
+      const y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+      ;[x2, x1, y2, y1] = [x1, x, y1, y]
+      return y
+    }
+  }
+}
+
+/** Mulberry32: fixed noise, so a cue sounds the same every time. */
+function seededRandom(seed) {
+  let state = seed >>> 0
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0
+    let v = Math.imul(state ^ (state >>> 15), state | 1)
+    v ^= v + Math.imul(v ^ (v >>> 7), v | 61)
+    return ((v ^ (v >>> 14)) >>> 0) / 0x100000000
+  }
+}
+
+/** Count-down phases (get ready, stretch holds, switch sides) tick this many last seconds. */
+export const LAST_TICKS = 3
+
+/**
+ * Every sound left in the routine from `s`, as epoch-ms times:
+ *   get ready, switch sides  `ready` on its last 3, 2, 1
+ *   a step's first second    `go` (a stretch starting; each breath's 1)
+ *   counting up (breathing)  `tick` on 2, 3, 4
+ *   counting down (a hold)   `tick` on its last 3, 2, 1
+ *   finished                 `chime`
+ * Nothing for an offer (it wasn't asked for) or while paused.
+ * @returns {{ at: number, cue: 'ready' | 'go' | 'tick' | 'chime' }[]}
+ */
+export function soundPlan(s, ex) {
+  if (!isRoutineActive(s) || s.pausedAt != null) return []
+  const plan = []
+  const lastTicks = (start, ms, cue) => {
+    for (let k = Math.min(LAST_TICKS, Math.floor(ms / 1000)); k >= 1; k--) {
+      const at = start + ms - k * 1000
+      if (at > start || cue === 'ready') plan.push({ at, cue })
+    }
+  }
+  let from = 0
+  let t = s.endsAt
+  if (s.phase === 'prep') lastTicks(s.endsAt - PREP_MS, PREP_MS, 'ready')
+  else {
+    from = s.step
+    t = s.endsAt - ex.steps[s.step].ms
+  }
+  for (let i = from; i < ex.steps.length; i++) {
+    const st = ex.steps[i]
+    if (st.between) lastTicks(t, st.ms, 'ready')
+    else {
+      plan.push({ at: t, cue: 'go' })
+      if (ex.count === 'up') for (let k = 1; k * 1000 < st.ms; k++) plan.push({ at: t + k * 1000, cue: 'tick' })
+      else lastTicks(t, st.ms, 'tick')
+    }
+    t += st.ms
+  }
+  plan.push({ at: t, cue: 'chime' })
+  return plan
+}
+
+/** A beat this late (ms) still plays; later than that it's dropped, never bunched up. */
+const SOUND_LATE_MS = 60
+const SOUND_FADE_S = 0.012
+
+/**
+ * The player. Nothing touches Web Audio until the first wake()/sync(), so
+ * it's inert in Node. `sync(plan)` makes the scheduled beats match `plan`:
+ * an unchanged future (the routine just moved on a step) is left alone;
+ * anything else cancels what hasn't started and schedules afresh.
+ */
+export function createSound({ Ctor, now = () => Date.now() } = {}) {
+  const AudioCtor = Ctor ?? (typeof window !== 'undefined' ? window.AudioContext ?? window.webkitAudioContext : undefined)
+  let context = null
+  let out = null
+  const buffers = {}
+  /** Beats handed to the audio clock: { key, at, source, gain }. */
+  let voices = []
+  let plan = []
+  const keyOf = b => `${b.cue}@${b.at}`
+
+  const make = () => {
+    if (context || !AudioCtor) return context
+    try {
+      context = new AudioCtor({ latencyHint: 'interactive' })
+    } catch {
+      return null
+    }
+    out = context.createGain()
+    out.connect(context.destination)
+    for (const [name, recipe] of Object.entries(SOUND_CUES)) {
+      const samples = renderCue(recipe, context.sampleRate)
+      buffers[name] = context.createBuffer(1, samples.length, context.sampleRate)
+      buffers[name].copyToChannel(samples, 0)
+    }
+    context.onstatechange = () => {
+      if (context && context.state === 'running') sync(plan)
+    }
+    return context
+  }
+  const running = () => Boolean(context) && context.state === 'running'
+  const wake = () => {
+    if (!make()) return
+    if (context.state !== 'running') context.resume().catch(() => {})
+  }
+  const startVoice = (beat, t) => {
+    const source = context.createBufferSource()
+    source.buffer = buffers[beat.cue]
+    const gain = context.createGain()
+    source.connect(gain).connect(out)
+    const voice = { key: keyOf(beat), at: beat.at, source, gain }
+    source.onended = () => {
+      voices = voices.filter(v => v !== voice)
+      gain.disconnect()
+    }
+    source.start(context.currentTime + Math.max(0, (beat.at - t) / 1000))
+    voices.push(voice)
+  }
+  const cancel = (v, fade) => {
+    try {
+      if (fade) {
+        v.gain.gain.setTargetAtTime(0, context.currentTime, SOUND_FADE_S / 3)
+        v.source.stop(context.currentTime + SOUND_FADE_S * 3)
+      } else v.source.stop()
+    } catch {}
+  }
+  function sync(next) {
+    plan = next
+    const t = now()
+    const want = next.filter(b => b.at >= t - SOUND_LATE_MS)
+    if (want.length && !running()) {
+      wake() // once it runs, onstatechange syncs again
+      if (!running()) return
+    }
+    if (!context) return
+    const have = new Set(voices.map(v => v.key))
+    if (want.every(b => have.has(keyOf(b))) && voices.every(v => v.at <= t || want.some(b => keyOf(b) === v.key))) return
+    const started = new Set()
+    voices = voices.filter(v => {
+      if (v.at <= t) return started.add(v.key) // already sounding: let it ring
+      cancel(v, false)
+      return false
+    })
+    for (const b of want) if (!started.has(keyOf(b))) startVoice(b, t)
+  }
+  return {
+    wake,
+    sync,
+    /** Mute now: drop what's queued and fade what's ringing. */
+    silence() {
+      plan = []
+      if (context) for (const v of voices) cancel(v, v.at <= now())
+      voices = []
+    },
+    /** Play a cue now unless the same cue started within `ms` (e.g. the chime on skip-to-done). */
+    playOnce(cue, ms = 500) {
+      const t = now()
+      if (voices.some(v => v.key.startsWith(`${cue}@`) && Math.abs(v.at - t) < ms)) return
+      if (!running()) return
+      startVoice({ cue, at: t }, t)
+    },
+    close() {
+      plan = []
+      voices = []
+      if (context) context.close().catch(() => {})
+      context = null
+    },
+    /** Tests/debug: keys of the beats handed to the audio clock. */
+    scheduled: () => voices.map(v => v.key)
+  }
 }
 
 function clock(ts) {
@@ -961,6 +1256,22 @@ function StretchCompact({ model, s }) {
 }
 
 /** While an exercise runs: figure, big countdown, routine bar, cue, controls. */
+/** Mute toggle, top right of the card (unlabelled icon, so it gets a Tip). */
+function SoundToggle({ model }) {
+  const on = useValue(model.$settings).soundOn
+  const label = on ? 'Mute sounds' : 'Turn sounds on'
+  return jsx(Tip, {
+    label,
+    children: jsx(Button, {
+      variant: 'ghost',
+      size: 'icon-xs',
+      'aria-label': label,
+      onClick: model.actions.toggleSound,
+      children: jsx(Codicon, { name: on ? 'unmute' : 'mute' })
+    })
+  })
+}
+
 function StretchLarge({ model, s, now, wide }) {
   const ex = exerciseOf(s)
   const a = model.actions
@@ -984,10 +1295,16 @@ function StretchLarge({ model, s, now, wide }) {
     style: { flex: '1 1 260px', minWidth: 0, display: 'grid', alignContent: 'center', gap: 10 },
     children: [
       jsxs('div', {
-        style: { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '2px 10px' },
+        style: { display: 'flex', alignItems: 'center', gap: 8 },
         children: [
-          jsx('span', { style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' }, children: ex.name }),
-          jsx('span', { style: { ...S.muted, fontSize: 13 }, children: ex.roundText(currentRound(s, ex)) })
+          jsxs('div', {
+            style: { flex: 1, minWidth: 0, display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '2px 10px' },
+            children: [
+              jsx('span', { style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' }, children: ex.name }),
+              jsx('span', { style: { ...S.muted, fontSize: 13 }, children: ex.roundText(currentRound(s, ex)) })
+            ]
+          }),
+          jsx(SoundToggle, { model })
         ]
       }),
       jsxs('div', {
@@ -1065,9 +1382,10 @@ function StretchDone({ model, s, wide }) {
             children: [
               jsx(Tick, {}),
               jsx('span', {
-                style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' },
+                style: { flex: 1, minWidth: 0, fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' },
                 children: 'Well done, you did it'
-              })
+              }),
+              jsx(SoundToggle, { model })
             ]
           }),
           jsx('div', { style: { fontSize: 14, color: 'var(--ui-text-secondary)', lineHeight: 1.45 }, children: ex.doneText }),
@@ -1243,6 +1561,12 @@ function SettingsPage({ model }) {
         checked: s.breathersEnabled,
         onChange: on => set({ breathersEnabled: on })
       }),
+      jsx(ToggleRow, {
+        label: 'Play sounds',
+        description: 'Soft ticks to count along with during an exercise, and a chime when you finish. Also on the card itself.',
+        checked: s.soundOn,
+        onChange: on => model.actions.setSoundOn(on)
+      }),
       jsx(ListRow, {
         title: 'Time between breaks',
         description: 'After a stretch (or skipping one), wait this long before offering another.',
@@ -1287,6 +1611,17 @@ export default {
     let lastBreatherAt = ctx.storage.get('lastBreatherAt', null)
     /** Debug view only: tension in the window and when a breather was armed. */
     const $tension = atom({ total: 0, armedAt: null })
+    /** Ticks and the chime, scheduled from the routine (one player, however many cards render). */
+    const sound = createSound()
+    ctx.onDispose(() => sound.close())
+    const syncSound = () => {
+      const r = $routine.get()
+      sound.sync($settings.get().soundOn ? soundPlan(r, exerciseOf(r)) : [])
+    }
+    /** Called from our own buttons: a click is when audio is allowed to start. */
+    const wakeSound = () => {
+      if ($settings.get().soundOn) sound.wake()
+    }
 
     // Per-session turn-busy map. Fall back to the focused flag on older
     // desktops that lack busyBySession (this fallback can't tell a session
@@ -1532,11 +1867,14 @@ export default {
           patchUi({ pinned: false, offered: false })
           cancelDone = stop(cancelDone)
           cancelDone = ctx.setTimeout(dismissDone, DONE_LINGER_MS)
+          // Skipped to the end: the scheduled chime was cancelled, so ring now.
+          if ($settings.get().soundOn) sound.playOnce('chime')
         } else if (s.phase !== 'done') {
           cancelDone = stop(cancelDone)
           dismissingDone = false
         }
         prevPhase = s.phase
+        syncSound()
         syncPane() // start/end of a routine changes whether the pane is wanted
       })
     )
@@ -1588,6 +1926,13 @@ export default {
       togglePane: () => (paneShowing() ? hidePane() : showPane()),
       setView: view => patchUi({ view }),
       updateSettings,
+      setSoundOn: on => {
+        updateSettings({ soundOn: on })
+        if (on) sound.wake()
+        else sound.silence()
+        syncSound()
+      },
+      toggleSound: () => model.actions.setSoundOn(!$settings.get().soundOn),
       /** PROTOTYPE: cycle placements (in-panel switch and ⌘K). */
       nextPlacement: () => {
         const ids = PLACEMENTS.map(([id]) => id)
@@ -1602,14 +1947,24 @@ export default {
       },
       /** Start an exercise right away (⌘K). */
       startExercise: ex => {
+        wakeSound()
         patchUi({ view: 'stretch' })
         $routine.set(startRoutine(ex, Date.now()))
       },
       /** Start whichever exercise the card shows. */
-      startStretch: () => setRoutine((s, now) => startRoutine(exerciseOf(s), now)),
+      startStretch: () => {
+        wakeSound()
+        setRoutine((s, now) => startRoutine(exerciseOf(s), now))
+      },
       pauseStretch: () => setRoutine(pauseRoutine),
-      resumeStretch: () => setRoutine(resumeRoutine),
-      skipStretch: () => setRoutine((s, now) => skipRoutine(s, exerciseOf(s), now)),
+      resumeStretch: () => {
+        wakeSound()
+        setRoutine(resumeRoutine)
+      },
+      skipStretch: () => {
+        wakeSound()
+        setRoutine((s, now) => skipRoutine(s, exerciseOf(s), now))
+      },
       // Stop / not now = done with it: close now (exit fade only, no grace period).
       stopStretch: hidePane,
       notNow: hidePane,
