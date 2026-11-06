@@ -14,6 +14,7 @@ import plugin, {
   tensionUptick,
   NECK_TILT,
   currentRound,
+  displayCount,
   displaySeconds,
   exerciseOf,
   routineSeconds,
@@ -378,5 +379,20 @@ test('countdown: shows N … 1 and never 0', () => {
   const next = tickRoutine(s, ex, PREP_MS + 4_000)
   assert.equal(next.step, 1)
   assert.equal(displaySeconds(next, PREP_MS + 4_000), 4, 'the next step starts at 4')
+})
+
+test('count: breathing counts up 1 … 4; stretches and get-ready count down', () => {
+  const ex = BOX_BREATHING
+  const prep = startRoutine(ex, 0)
+  assert.deepEqual([0, 1_000, 2_999].map(t => displayCount(prep, ex, t)), [3, 2, 1], 'get ready counts down')
+  const s = tickRoutine(prep, ex, PREP_MS)
+  const shown = [0, 999, 1_000, 2_000, 3_000, 3_999, 4_000].map(t => displayCount(s, ex, PREP_MS + t))
+  assert.deepEqual(shown, [1, 1, 2, 3, 4, 4, 4], 'never 0, never 5')
+  const paused = pauseRoutine(s, PREP_MS + 2_500)
+  assert.equal(displayCount(paused, ex, PREP_MS + 60_000), 3, 'holds while paused')
+
+  const hold = tickRoutine(startRoutine(NECK_TILT, 0), NECK_TILT, PREP_MS)
+  assert.equal(displayCount(hold, NECK_TILT, PREP_MS), 20, 'stretch hold counts down')
+  assert.equal(displayCount(hold, NECK_TILT, PREP_MS + 19_500), 1)
 })
 

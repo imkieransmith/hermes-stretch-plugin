@@ -598,7 +598,7 @@ test('card: draws the step that is actually running, even before the driver tick
   assert.equal($routine.get().step, 0, 'driver has not caught up yet')
   const shown = texts(expand(ctx.pane().render()))
   assert.ok(shown.includes('hold'), 'already on the next step')
-  assert.ok(shown.includes('4'), 'counting from 4')
+  assert.ok(shown.includes('1'), 'counting up from 1')
   assert.ok(!shown.includes('0'), 'never a 0')
   ctx.dispose()
 })

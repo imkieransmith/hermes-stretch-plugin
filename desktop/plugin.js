@@ -85,7 +85,7 @@ export const PLACEMENTS = [
  */
 export const DEV = { keepPaneOpen: true }
 /** DEV ONLY — bump on each change so a stale hot reload is obvious in the UI. */
-const DEV_BUILD = 'b15'
+const DEV_BUILD = 'b16'
 /** Exit animation length; the pane is unregistered when it completes. */
 export const EXIT_MS = 220
 const ENTER_MS = 280
@@ -370,6 +370,8 @@ export const OFFER_MS = 5_000
  *     round  index into `rounds` (bar segment + "Rep 1 of 2"); null = an
  *            in-between step (a rest) with its own unlabelled bar segment
  *   rounds: bar labels, one per round (null = no label row)
+ *   count:  how the big number runs during steps: 'down' (time left, the
+ *           default) or 'up' (a breathing pace: 1, 2, 3, 4)
  */
 export const NECK_TILT = {
   id: 'neck-side-tilt',
@@ -402,6 +404,7 @@ export const BOX_BREATHING = {
   doneText: 'Four slow rounds of box breathing. Nice and steady.',
   setup: 'Sit comfortably and let your shoulders drop. Breathe out fully.',
   prepPose: 'ready',
+  count: 'up',
   rounds: Array.from({ length: BOX_ROUNDS }, () => null),
   roundText: i => `Round ${i + 1} of ${BOX_ROUNDS}`,
   steps: Array.from({ length: BOX_ROUNDS }, (_, round) => [
@@ -500,6 +503,18 @@ export function remainingMs(s, now) {
  */
 export function displaySeconds(s, now) {
   return Math.max(1, Math.ceil(remainingMs(s, now) / 1000))
+}
+
+/**
+ * The big number for the current phase. Steps of a counting-up exercise go
+ * 1 … N (N on the last beat, never N+1); everything else counts down N … 1
+ * (the get-ready and the offer countdown included).
+ */
+export function displayCount(s, ex, now) {
+  if (s.phase !== 'step' || ex.count !== 'up') return displaySeconds(s, now)
+  const total = phaseDurationMs(s, ex)
+  const elapsed = total - remainingMs(s, now)
+  return Math.min(Math.ceil(total / 1000), Math.floor(elapsed / 1000) + 1)
 }
 
 /** 0 → 1 through the current phase. */
@@ -988,7 +1003,7 @@ function StretchLarge({ model, s, now, wide }) {
               color: 'var(--ui-text-primary)',
               opacity: paused ? 0.45 : 1
             },
-            children: displaySeconds(s, now)
+            children: displayCount(s, ex, now)
           }),
           jsx('span', { style: { ...S.muted, fontSize: 13 }, children: paused ? 'paused' : step ? step.label : 'get ready' })
         ]
