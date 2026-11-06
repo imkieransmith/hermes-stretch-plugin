@@ -87,7 +87,7 @@ export const PLACEMENTS = [
  */
 export const DEV = { keepPaneOpen: true }
 /** DEV ONLY — bump on each change so a stale hot reload is obvious in the UI. */
-const DEV_BUILD = 'b28'
+const DEV_BUILD = 'b29'
 /** Exit animation length; the pane is unregistered when it completes. */
 export const EXIT_MS = 220
 const ENTER_MS = 280
@@ -1084,10 +1084,17 @@ function DebugView({ model }) {
 
 // ── Stretch card: compact (offer / idle / done) and large (while stretching) ──
 
-/** Below this width the large layout shows one figure instead of two. */
-const WIDE_MIN_PX = 620
-const FIGURE_PX = 128
-const FIGURE_NARROW_PX = 104
+/**
+ * The figure tile (exercise + well done). Side by side with the text it is
+ * as tall as the text column (TILE_MIN_PX…TILE_MAX_PX), so it fills the card.
+ * Narrower than STACK_BELOW_PX it sits on its own line above, at
+ * TILE_STACKED_PX.
+ */
+const TILE_PAD_PX = 14
+const TILE_MIN_PX = 156
+const TILE_MAX_PX = 280
+const TILE_STACKED_PX = 220
+const STACK_BELOW_PX = 540
 const THUMB_PX = 44
 const FADE_MS = 160
 
@@ -1107,6 +1114,46 @@ function useWidth(ref) {
     return () => ro.disconnect()
   }, [])
   return width
+}
+
+/** Our own element's border-box height (ResizeObserver); null until measured. */
+function useHeight(ref) {
+  const [height, setHeight] = useState(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el || typeof ResizeObserver === 'undefined') return undefined
+    const ro = new ResizeObserver(() => {
+      const h = Math.round(el.getBoundingClientRect().height)
+      // ±1 px is rounding noise; ignoring it keeps tile ↔ text from ping-ponging.
+      setHeight(prev => (prev != null && Math.abs(prev - h) <= 1 ? prev : h))
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  return height
+}
+
+/** Tile size: the text column's height, clamped; fixed when stacked. */
+export function tileSize(textHeight, stacked) {
+  if (stacked) return TILE_STACKED_PX
+  if (textHeight == null) return TILE_MIN_PX
+  return Math.max(TILE_MIN_PX, Math.min(TILE_MAX_PX, textHeight))
+}
+
+/** The grey tile holding the figure, `size` px square. */
+function FigureTile({ pose, size }) {
+  return jsx('div', {
+    style: { flex: 'none', padding: TILE_PAD_PX, borderRadius: 'var(--radius-xl)', background: 'var(--ui-bg-tertiary)' },
+    children: jsx(Figure, { pose, size: size - 2 * TILE_PAD_PX })
+  })
+}
+
+/** Figure tile + text column: side by side, or tile above when `stacked`. */
+function TileRow({ pose, stacked, textHeight, text }) {
+  return jsxs('div', {
+    style: { display: 'flex', flexDirection: stacked ? 'column' : 'row', alignItems: stacked ? 'flex-start' : 'center', gap: stacked ? 16 : 24 },
+    children: [jsx(FigureTile, { pose, size: tileSize(textHeight, stacked) }), text]
+  })
 }
 
 const STEP_ENTER_MS = 250
@@ -1318,7 +1365,7 @@ function SoundToggle({ model }) {
 }
 
 /** While an exercise runs: figure, big countdown, routine bar, cue, controls. */
-function StretchLarge({ model, s, now, wide }) {
+function StretchLarge({ model, s, now, stacked, onTile }) {
   const ex = exerciseOf(s)
   const a = model.actions
   const paused = s.pausedAt != null
@@ -1333,13 +1380,15 @@ function StretchLarge({ model, s, now, wide }) {
   useEnterOnChange(countRef, stepKey)
   useEnterOnChange(cueRef, cue)
 
-  const tile = jsx('div', {
-    style: { flex: 'none', padding: 14, borderRadius: 'var(--radius-xl)', background: 'var(--ui-bg-tertiary)' },
-    children: jsx(Figure, { pose: currentPose(s, ex), size: wide ? FIGURE_PX : FIGURE_NARROW_PX })
-  })
+  const bodyRef = useRef(null)
+  const textHeight = useHeight(bodyRef)
+  useEffect(() => {
+    if (textHeight != null && onTile) onTile(tileSize(textHeight, stacked))
+  }, [textHeight, stacked])
 
   const body = jsxs('div', {
-    style: { flex: '1 1 260px', minWidth: 0, display: 'grid', alignContent: 'center', gap: 10 },
+    ref: bodyRef,
+    style: { flex: '1 1 0', minWidth: 0, alignSelf: stacked ? 'stretch' : 'auto', display: 'grid', alignContent: 'center', gap: 10 },
     children: [
       jsxs('div', {
         style: { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '2px 10px' },
@@ -1382,10 +1431,7 @@ function StretchLarge({ model, s, now, wide }) {
     ]
   })
 
-  return jsxs('div', {
-    style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 24 },
-    children: [tile, body]
-  })
+  return jsx(TileRow, { pose: currentPose(s, ex), stacked, textHeight, text: body })
 }
 
 /**
@@ -1415,33 +1461,30 @@ function Tick() {
  * Finished: same footprint as the exercise (no jump), a "done" figure, a tick
  * and a well done. Leaves by itself after DONE_LINGER_MS; Close skips the wait.
  */
-function StretchDone({ model, s, wide }) {
+function StretchDone({ model, s, stacked, tile }) {
   const ex = exerciseOf(s)
-  return jsxs('div', {
-    style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 24 },
-    children: [
-      jsx('div', {
-        style: { flex: 'none', padding: 14, borderRadius: 'var(--radius-xl)', background: 'var(--ui-bg-tertiary)' },
-        children: jsx(Figure, { pose: 'done', size: wide ? FIGURE_PX : FIGURE_NARROW_PX })
-      }),
-      jsxs('div', {
-        style: { flex: '1 1 260px', minWidth: 0, display: 'grid', alignContent: 'center', gap: 10 },
-        children: [
-          jsxs('div', {
-            style: { display: 'flex', alignItems: 'center', gap: 10 },
-            children: [
-              jsx(Tick, {}),
-              jsx('span', {
-                style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' },
-                children: 'Well done, you did it'
-              })
-            ]
-          }),
-          jsx('div', { style: { fontSize: 14, color: 'var(--ui-text-secondary)', lineHeight: 1.45 }, children: ex.doneText }),
-          jsx('div', { children: jsx(QuietButton, { onClick: model.actions.dismissDone, children: 'Close' }) })
-        ]
-      })
-    ]
+  return jsx(TileRow, {
+    pose: 'done',
+    stacked,
+    // Keep the exercise's tile size, so the card doesn't jump on finishing.
+    textHeight: tile,
+    text: jsxs('div', {
+      style: { flex: '1 1 0', minWidth: 0, alignSelf: stacked ? 'stretch' : 'auto', display: 'grid', alignContent: 'center', gap: 10 },
+      children: [
+        jsxs('div', {
+          style: { display: 'flex', alignItems: 'center', gap: 10 },
+          children: [
+            jsx(Tick, {}),
+            jsx('span', {
+              style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' },
+              children: 'Well done, you did it'
+            })
+          ]
+        }),
+        jsx('div', { style: { fontSize: 14, color: 'var(--ui-text-secondary)', lineHeight: 1.45 }, children: ex.doneText }),
+        jsx('div', { children: jsx(QuietButton, { onClick: model.actions.dismissDone, children: 'Close' }) })
+      ]
+    })
   })
 }
 
@@ -1457,7 +1500,9 @@ function StretchBody({ model }) {
   const s = tickRoutine(stored, exerciseOf(stored), now)
   const ref = useRef(null)
   const width = useWidth(ref)
-  const wide = width == null || width >= WIDE_MIN_PX
+  const stacked = width != null && width < STACK_BELOW_PX
+  // The exercise's tile size, carried into the well-done view (same footprint).
+  const [tile, setTile] = useState(null)
   const layout = s.phase === 'done' ? 'done' : isLargePhase(s.phase) ? 'large' : 'compact'
   // 100 ms keeps each second of the countdown even (≤ 0.1 s late).
   useTicker(isTimed(s) && s.pausedAt == null, 100)
@@ -1470,9 +1515,9 @@ function StretchBody({ model }) {
     style: { position: 'relative', width: '100%', fontSize: 12, paddingRight: corner ? 40 : 0, boxSizing: 'border-box' },
     children: [
       layout === 'done'
-        ? jsx(StretchDone, { model, s, wide })
+        ? jsx(StretchDone, { model, s, stacked, tile })
         : layout === 'large'
-          ? jsx(StretchLarge, { model, s, now, wide })
+          ? jsx(StretchLarge, { model, s, now, stacked, onTile: setTile })
           : jsx(StretchCompact, { model, s }),
       corner ? jsx('div', { style: { position: 'absolute', top: 0, right: 0 }, children: jsx(SoundToggle, { model }) }) : null
     ]

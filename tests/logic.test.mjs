@@ -17,6 +17,7 @@ import plugin, {
   displayCount,
   countText,
   countParts,
+  tileSize,
   LAST_TICKS,
   SOUND_CUES,
   SOUND_PEAK,
@@ -570,3 +571,12 @@ test('countText: pads to the exercise width, so the number never changes width',
   const breath = tickRoutine(startRoutine(BOX_BREATHING, 0), BOX_BREATHING, PREP_MS)
   assert.equal(countText(breath, BOX_BREATHING, PREP_MS + 2_500), '3')
 })
+
+test('tileSize: matches the text column, within bounds; fixed when stacked', () => {
+  assert.equal(tileSize(null, false), 156, 'before measuring')
+  assert.equal(tileSize(100, false), 156, 'never smaller than before')
+  assert.equal(tileSize(214, false), 214, 'fills the card height')
+  assert.equal(tileSize(900, false), 280, 'capped')
+  assert.equal(tileSize(214, true), 220, 'own line')
+})
+
