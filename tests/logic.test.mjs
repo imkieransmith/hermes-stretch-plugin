@@ -18,6 +18,7 @@ import plugin, {
   formatDuration,
   idleRoutine,
   inCooldown,
+  isLargePhase,
   isRoutineActive,
   isTimed,
   normalizeSettings,
@@ -26,6 +27,7 @@ import plugin, {
   phaseProgress,
   remainingMs,
   resumeRoutine,
+  routineSegments,
   shortId,
   shouldOffer,
   shouldShowPane,
@@ -214,3 +216,31 @@ test('no native title= on buttons (Hermes DESIGN.md; core has the same test)', (
   assert.doesNotMatch(src, /jsxs?\(\s*Button,\s*\{[^}]*\btitle:/, 'Button with title')
   assert.doesNotMatch(src, /jsxs?\(\s*'button',\s*\{[^}]*\btitle:/, 'button with title')
 })
+
+test('layout: large while stretching, compact otherwise', () => {
+  for (const p of ['prep', 'hold', 'rest']) assert.equal(isLargePhase(p), true, p)
+  for (const p of ['idle', 'offer', 'done']) assert.equal(isLargePhase(p), false, p)
+})
+
+test('routine bar: a segment per hold, a rest between, filled in order', () => {
+  const HOLD = EXERCISE.holdMs
+  const fills = s => routineSegments(s, EXERCISE, at).map(x => Math.round(x.fill * 100) / 100)
+  let at = 0
+  let s = startRoutine(EXERCISE, 0)
+  assert.deepEqual(routineSegments(s, EXERCISE, 0).map(x => x.kind), ['hold', 'rest', 'hold'])
+  assert.deepEqual(fills(s), [0, 0, 0], 'getting ready: empty')
+  at = PREP_MS + HOLD / 2
+  s = tickRoutine(s, EXERCISE, at)
+  assert.deepEqual(fills(s), [0.5, 0, 0], 'halfway through the left hold')
+  at = PREP_MS + HOLD + REST_MS / 2
+  s = tickRoutine(s, EXERCISE, at)
+  assert.deepEqual(fills(s), [1, 0.5, 0], 'halfway through the rest')
+  at = PREP_MS + HOLD + REST_MS + HOLD / 4
+  s = tickRoutine(s, EXERCISE, at)
+  assert.deepEqual(fills(s), [1, 1, 0.25], 'a quarter into the right hold')
+  at = PREP_MS + 2 * HOLD + REST_MS
+  s = tickRoutine(s, EXERCISE, at)
+  assert.equal(s.phase, 'done')
+  assert.deepEqual(fills(s), [1, 1, 1])
+})
+

@@ -77,7 +77,7 @@ export const PLACEMENTS = [
  */
 export const DEV = { keepPaneOpen: true }
 /** DEV ONLY — bump on each change so a stale hot reload is obvious in the UI. */
-const DEV_BUILD = 'b7'
+const DEV_BUILD = 'b8'
 /** Exit animation length; the pane is unregistered when it completes. */
 export const EXIT_MS = 220
 const ENTER_MS = 280
@@ -227,10 +227,11 @@ export const EXERCISE = {
   name: 'Neck side tilt',
   summary: 'Eases tension along the sides of your neck.',
   holdMs: 20_000,
-  steps: ['Sit tall with your shoulders relaxed and down.', 'Let your head tilt slowly. Don’t pull it.', 'Breathe slowly. Ease off if anything pinches.'],
+  /** Shown while getting ready. */
+  setup: 'Sit tall, shoulders relaxed and down.',
   reps: [
-    { label: 'Left side', cue: 'Tilt your left ear toward your left shoulder.' },
-    { label: 'Right side', cue: 'Tilt your right ear toward your right shoulder.' }
+    { side: 'Left', cue: 'Let your head tilt toward your left shoulder. Don’t pull it.' },
+    { side: 'Right', cue: 'Let your head tilt toward your right shoulder. Don’t pull it.' }
   ]
 }
 
@@ -513,194 +514,354 @@ function DebugView({ model }) {
   })
 }
 
-const RING_SIZE = 168
-const RING_STROKE = 8
+// ── Stretch card: compact (offer / idle / done) and large (while stretching) ──
 
-/** Countdown ring: track + accent arc, seconds in the middle. */
-function Ring({ progress, seconds, caption, dim, size = RING_SIZE, stroke = RING_STROKE }) {
-  const big = size >= 120
-  const r = (size - stroke) / 2
-  const c = 2 * Math.PI * r
-  const circle = (color, extra) =>
-    jsx('circle', {
-      cx: size / 2,
-      cy: size / 2,
-      r,
-      fill: 'none',
-      stroke: color,
-      strokeWidth: stroke,
-      strokeLinecap: 'round',
-      ...extra
+/** Below this width the large layout shows one figure instead of two. */
+const WIDE_MIN_PX = 620
+const FIGURE_PX = 128
+const FIGURE_NARROW_PX = 104
+const THUMB_PX = 44
+const FADE_MS = 160
+
+/** Whole routine length (get ready + holds + rests), rounded to 5 s. */
+function routineSeconds(ex) {
+  const ms = PREP_MS + ex.holdMs * ex.reps.length + REST_MS * (ex.reps.length - 1)
+  return Math.round(ms / 5000) * 5
+}
+
+/** Large layout for the phases where you're actually stretching. */
+export function isLargePhase(phase) {
+  return phase === 'prep' || phase === 'hold' || phase === 'rest'
+}
+
+/** Width of our own element (ResizeObserver; null until measured). */
+function useWidth(ref) {
+  const [width, setWidth] = useState(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el || typeof ResizeObserver === 'undefined') return undefined
+    const ro = new ResizeObserver(([entry]) => setWidth(Math.round(entry.contentRect.width)))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  return width
+}
+
+/** Soft cross-fade of our own element when `key` changes (not on mount). */
+function useFadeOnChange(ref, key) {
+  const first = useRef(true)
+  useEffect(() => {
+    if (first.current) {
+      first.current = false
+      return undefined
+    }
+    const el = ref.current
+    if (!el || typeof el.animate !== 'function' || prefersReducedMotion()) return undefined
+    const anim = el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: FADE_MS, easing: EASE_OUT })
+    return () => anim.cancel()
+  }, [key])
+}
+
+/**
+ * PLACEHOLDER for the exercise illustration (real assets to come).
+ * `side` is the rep's side ('Left' / 'Right'). Swap this for the artwork;
+ * keep it theme-driven (currentColor / --ui-* vars) for light and dark.
+ */
+function Figure({ side, size, active = true }) {
+  return jsx('div', {
+    'aria-hidden': 'true',
+    style: {
+      width: size,
+      height: size,
+      flex: 'none',
+      display: 'grid',
+      placeItems: 'center',
+      textAlign: 'center',
+      borderRadius: 'var(--radius-lg)',
+      border: '1px dashed var(--ui-stroke-secondary)',
+      color: 'var(--ui-text-quaternary)',
+      fontSize: size >= 80 ? 11 : 9,
+      lineHeight: 1.3,
+      whiteSpace: 'pre-line',
+      opacity: active ? 1 : 0.5,
+      transition: 'opacity 200ms ease'
+    },
+    children: size >= 80 ? `figure\n${side.toLowerCase()}` : side[0]
+  })
+}
+
+/** Thin progress bar; `fill` 0 → 1. */
+function Bar({ fill, dim = false, height = 4 }) {
+  return jsx('div', {
+    style: { flex: 1, minWidth: 0, height, borderRadius: 999, background: 'var(--ui-stroke-secondary)', overflow: 'hidden' },
+    children: jsx('div', {
+      style: {
+        width: `${Math.round(Math.min(1, Math.max(0, fill)) * 1000) / 10}%`,
+        height: '100%',
+        borderRadius: 999,
+        background: 'var(--ui-accent)',
+        opacity: dim ? 0.45 : 1,
+        transition: 'width 200ms linear, opacity 200ms ease'
+      }
+    })
+  })
+}
+
+/**
+ * How full each segment of the routine bar is: a segment per hold, with a
+ * short one between holds for the rest. 0 → 1 each.
+ */
+export function routineSegments(s, ex, now) {
+  const p = phaseProgress(s, ex, now)
+  const out = []
+  ex.reps.forEach((rep, i) => {
+    const hold = i < s.rep || (i === s.rep && (s.phase === 'rest' || s.phase === 'done')) ? 1 : i === s.rep && s.phase === 'hold' ? p : 0
+    out.push({ kind: 'hold', rep: i, weight: ex.holdMs, fill: hold })
+    if (i < ex.reps.length - 1) {
+      const rest = i < s.rep || s.phase === 'done' ? 1 : i === s.rep && s.phase === 'rest' ? p : 0
+      out.push({ kind: 'rest', rep: i, weight: REST_MS, fill: rest })
+    }
+  })
+  return out
+}
+
+/** The routine bar (Left · rest · Right) with side labels under the holds. */
+function RoutineBar({ s, ex, now }) {
+  const segs = routineSegments(s, ex, now)
+  const paused = s.pausedAt != null
+  const current = s.phase === 'rest' ? s.rep + 1 : s.rep
+  const row = render =>
+    jsx('div', {
+      style: { display: 'flex', gap: 4 },
+      children: segs.map((seg, i) => jsx('div', { style: { flex: `${seg.weight} 1 0`, minWidth: 0, display: 'flex' }, children: render(seg) }, i))
     })
   return jsxs('div', {
-    style: { position: 'relative', width: size, height: size, flex: 'none' },
+    style: { display: 'grid', gap: 6, width: '100%', maxWidth: 440 },
     children: [
-      jsxs('svg', {
-        width: size,
-        height: size,
-        viewBox: `0 0 ${size} ${size}`,
-        style: { transform: 'rotate(-90deg)' },
-        'aria-hidden': 'true',
+      row(seg => jsx(Bar, { fill: seg.fill, dim: paused })),
+      row(seg =>
+        seg.kind === 'hold'
+          ? jsx('span', {
+              style: {
+                fontSize: 12,
+                color: seg.rep === current ? 'var(--ui-text-secondary)' : 'var(--ui-text-tertiary)',
+                whiteSpace: 'nowrap'
+              },
+              children: ex.reps[seg.rep].side
+            })
+          : null
+      )
+    ]
+  })
+}
+
+/** PROTOTYPE chrome: dev build label + placement switch. Remove before release. */
+function ProtoBits({ model }) {
+  return jsxs('span', {
+    style: { display: 'inline-flex', alignItems: 'center', gap: 8 },
+    children: [
+      DEV.keepPaneOpen ? jsx('span', { style: { ...S.faint, ...S.mono }, children: `dev ${DEV_BUILD}` }) : null,
+      jsx(PlacementCycle, { model })
+    ]
+  })
+}
+
+/** Offer, idle and done: one compact row (~50px), so the chat barely moves. */
+function StretchCompact({ model, chrome }) {
+  const ex = EXERCISE
+  const s = useValue(model.$routine)
+  const ui = useValue(model.$ui)
+  const a = model.actions
+  const now = Date.now()
+  const about = `${ex.reps.length} × ${ex.holdMs / 1000} s · about ${routineSeconds(ex)} s`
+
+  let heading, sub, bar = null, actions
+  if (s.phase === 'offer') {
+    const left = Math.ceil(remainingMs(s, now) / 1000)
+    heading = 'Quick stretch while Hermes works?'
+    sub = `${ex.name} · ${about}`
+    bar = jsxs('div', {
+      style: { display: 'flex', alignItems: 'center', gap: 8, maxWidth: 320 },
+      children: [
+        jsx(Bar, { fill: phaseProgress(s, ex, now), height: 3 }),
+        jsx('span', { style: { ...S.muted, ...S.mono, fontSize: 11, whiteSpace: 'nowrap' }, children: `starts in ${left} s` })
+      ]
+    })
+    actions = [
+      jsx(Button, { size: 'sm', onClick: a.skipStretch, children: 'Start now' }, 'go'),
+      jsx(TextButton, { onClick: a.notNow, children: 'Not now' }, 'no')
+    ]
+  } else if (s.phase === 'done') {
+    heading = 'Nice one'
+    sub = `${ex.name} done. Roll your shoulders and carry on.`
+    actions = [
+      jsx(TextButton, { onClick: a.startStretch, children: 'Again' }, 'again'),
+      jsx(TextButton, { onClick: a.hidePane, children: 'Hide' }, 'hide')
+    ]
+  } else {
+    heading = ui.offered ? 'Quick stretch while Hermes works?' : ex.name
+    sub = ui.offered ? `${ex.name} · ${about}` : `${ex.summary} ${about}.`
+    actions = [
+      jsx(Button, { size: 'sm', onClick: a.startStretch, children: 'Start' }, 'go'),
+      jsx(TextButton, { onClick: a.notNow, children: ui.offered ? 'Not now' : 'Hide' }, 'no')
+    ]
+  }
+
+  return jsxs('div', {
+    style: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px 12px' },
+    children: [
+      jsx(Figure, { side: ex.reps[0].side, size: THUMB_PX }),
+      jsxs('div', {
+        style: { flex: '1 1 220px', minWidth: 0, display: 'grid', gap: 3 },
         children: [
-          circle('var(--ui-stroke-secondary)'),
-          circle('var(--ui-accent)', {
-            strokeDasharray: c,
-            strokeDashoffset: c * (1 - Math.min(1, Math.max(0, progress))),
-            style: { transition: 'stroke-dashoffset 200ms linear', opacity: dim ? 0.45 : 1 }
-          })
+          jsxs('div', {
+            style: { display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 },
+            children: [
+              jsx('span', { style: { fontSize: 13, fontWeight: 600, color: 'var(--ui-text-primary)', whiteSpace: 'nowrap' }, children: heading }),
+              jsx('span', {
+                style: { ...S.muted, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                children: sub
+              })
+            ]
+          }),
+          bar
         ]
       }),
       jsxs('div', {
-        style: { position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', alignContent: 'center', gap: 2 },
-        children: [
-          jsx('div', {
-            style: { ...S.mono, fontSize: big ? 40 : Math.round(size * 0.3), fontWeight: 600, color: 'var(--ui-text-primary)', lineHeight: 1 },
-            children: seconds
-          }),
-          big && caption
-            ? jsx('div', { style: { ...S.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em' }, children: caption })
-            : null
-        ]
+        style: { display: 'flex', alignItems: 'center', gap: 12, flex: 'none', marginLeft: 'auto' },
+        children: [...actions, chrome ? jsx(ProtoBits, { model }, 'proto') : null]
       })
     ]
   })
 }
 
-/** One dot per rep: done = filled, current = ring, upcoming = faint. */
-function RepDots({ total, current, done }) {
-  return jsx('div', {
-    style: { display: 'flex', gap: 8, justifyContent: 'center' },
-    children: Array.from({ length: total }, (_, i) => {
-      const complete = done || i < current
-      const active = !done && i === current
-      return jsx(
-        'span',
-        {
-          'aria-hidden': 'true',
-          style: {
-            width: 9,
-            height: 9,
-            borderRadius: 999,
-            background: complete ? 'var(--ui-accent)' : 'transparent',
-            border: `2px solid ${complete || active ? 'var(--ui-accent)' : 'var(--ui-stroke-secondary)'}`,
-            transition: 'background 200ms ease, border-color 200ms ease'
-          }
-        },
-        i
-      )
-    })
+const NUMBER_CAPTION = { prep: 'get ready', hold: 'seconds left', rest: 'switch sides' }
+
+/** Get ready, hold and rest: figure(s), big countdown, routine bar, controls. */
+function StretchLarge({ model, chrome, wide }) {
+  const ex = EXERCISE
+  const s = useValue(model.$routine)
+  const a = model.actions
+  const now = Date.now()
+  const paused = s.pausedAt != null
+  const rep = ex.reps[s.rep]
+  const next = ex.reps[s.rep + 1]
+  // The side you're on (or about to switch to, during the rest).
+  const focus = s.phase === 'rest' ? s.rep + 1 : s.rep
+  const cue =
+    s.phase === 'prep'
+      ? `${ex.setup} First: ${rep.side.toLowerCase()} side.`
+      : s.phase === 'rest'
+        ? `Slowly bring your head back to centre. Next: ${next.side.toLowerCase()} side.`
+        : rep.cue
+
+  const figure = i =>
+    jsxs(
+      'div',
+      {
+        style: { display: 'grid', justifyItems: 'center', gap: 8 },
+        children: [
+          jsx(Figure, { side: ex.reps[i].side, size: wide ? FIGURE_PX : FIGURE_NARROW_PX, active: i === focus }),
+          jsx('span', {
+            style: {
+              fontSize: 12,
+              fontWeight: i === focus ? 600 : 400,
+              color: i === focus ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)'
+            },
+            children: `${ex.reps[i].side} · rep ${i + 1}`
+          })
+        ]
+      },
+      i
+    )
+  const tile = jsx('div', {
+    style: {
+      flex: 'none',
+      display: 'flex',
+      gap: 16,
+      padding: 14,
+      borderRadius: 'var(--radius-xl)',
+      background: 'var(--ui-bg-tertiary)'
+    },
+    children: wide ? ex.reps.map((_, i) => figure(i)) : [figure(focus)]
+  })
+
+  const header = jsxs('div', {
+    style: { display: 'flex', alignItems: 'center', gap: 12 },
+    children: [
+      jsx('span', { style: { ...S.muted, fontSize: 12, fontWeight: 500 }, children: 'Stretch break' }),
+      jsx('span', { style: { flex: 1 } }),
+      chrome ? jsx(ProtoBits, { model }) : null
+    ]
+  })
+
+  const body = jsxs('div', {
+    style: { flex: '1 1 260px', minWidth: 0, display: 'grid', alignContent: 'center', gap: 10 },
+    children: [
+      jsxs('div', {
+        style: { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '2px 10px' },
+        children: [
+          jsx('span', { style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' }, children: ex.name }),
+          jsx('span', { style: { ...S.muted, fontSize: 13 }, children: `Rep ${focus + 1} of ${ex.reps.length} · ${ex.reps[focus].side} side` })
+        ]
+      }),
+      jsxs('div', {
+        style: { display: 'flex', alignItems: 'baseline', gap: 10 },
+        children: [
+          jsx('span', {
+            style: {
+              fontSize: 56,
+              fontWeight: 300,
+              lineHeight: 1,
+              fontVariantNumeric: 'tabular-nums',
+              color: 'var(--ui-text-primary)',
+              opacity: paused ? 0.45 : 1
+            },
+            children: Math.ceil(remainingMs(s, now) / 1000)
+          }),
+          jsx('span', { style: { ...S.muted, fontSize: 13 }, children: paused ? 'paused' : NUMBER_CAPTION[s.phase] })
+        ]
+      }),
+      jsx(RoutineBar, { s, ex, now }),
+      jsx('div', { style: { fontSize: 14, color: 'var(--ui-text-secondary)', lineHeight: 1.45 }, children: cue }),
+      jsxs('div', {
+        style: { display: 'flex', alignItems: 'center', gap: 14 },
+        children: [
+          jsx(Button, { variant: 'secondary', onClick: paused ? a.resumeStretch : a.pauseStretch, children: paused ? 'Resume' : 'Pause' }),
+          jsx(TextButton, { onClick: a.skipStretch, children: 'Skip' }),
+          jsx(TextButton, { onClick: a.stopStretch, children: 'Stop' })
+        ]
+      })
+    ]
+  })
+
+  return jsxs('div', {
+    style: { display: 'grid', gap: 12 },
+    children: [header, jsxs('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 24 }, children: [tile, body] })]
   })
 }
 
-const PHASE_CAPTION = { offer: 'starting', prep: 'get ready', hold: 'hold', rest: 'switch' }
-
-/** The exercise player (Stage 2): one exercise, a rep per side. */
-function StretchView({ model }) {
-  const ex = EXERCISE
+/**
+ * The stretch UI, sized by phase. `chrome` adds the prototype bits (the pane
+ * has its own top bar for those).
+ */
+function StretchBody({ model, chrome = true }) {
   const s = useValue(model.$routine)
-  const ui = useValue(model.$ui)
-  const a = model.actions
+  const ref = useRef(null)
+  const width = useWidth(ref)
+  const large = isLargePhase(s.phase)
   useTicker(isTimed(s) && s.pausedAt == null, 200)
-  const now = Date.now()
-
-  const column = children =>
-    jsx('div', {
-      style: { flex: 1, minHeight: 0, overflow: 'auto', display: 'grid', placeItems: 'center' },
-      children: jsx('div', {
-        style: { width: 'min(100%, 460px)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, textAlign: 'center' },
-        children
-      })
-    })
-  const title = jsx('div', { style: { fontSize: 22, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' }, children: ex.name })
-  const totalSec = Math.round((ex.holdMs * ex.reps.length) / 1000)
-
-  if (s.phase === 'idle') {
-    return column([
-      title,
-      jsx('div', { style: { ...S.muted, fontSize: 13 }, children: `${ex.summary} ${ex.reps.length} × ${ex.holdMs / 1000}s · about ${totalSec + 5}s.` }),
-      jsx('ol', {
-        style: { ...S.muted, fontSize: 13, margin: 0, paddingLeft: 18, textAlign: 'left', display: 'grid', gap: 4 },
-        children: ex.steps.map((t, i) => jsx('li', { children: t }, i))
-      }),
-      jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', gap: 14 },
-        children: [
-          jsx(Button, { onClick: a.startStretch, children: 'Start' }),
-          ui.offered ? jsx(TextButton, { onClick: a.notNow, children: 'Not now' }) : null
-        ]
-      })
-    ])
-  }
-
-  if (s.phase === 'offer') {
-    const first = ex.reps[0]
-    return column([
-      jsx('div', { style: { ...S.muted, fontSize: 13 }, children: 'Hermes is on a longer task. Time for a quick stretch?' }),
-      title,
-      jsx(Ring, {
-        progress: phaseProgress(s, ex, now),
-        seconds: Math.ceil(remainingMs(s, now) / 1000),
-        caption: PHASE_CAPTION.offer
-      }),
-      jsx('div', { style: { fontSize: 14, color: 'var(--ui-text-secondary)', minHeight: 40 }, children: `First: ${first.label.toLowerCase()}. ${first.cue}` }),
-      jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', gap: 14 },
-        children: [
-          jsx(Button, { onClick: a.skipStretch, children: 'Start now' }),
-          jsx(TextButton, { onClick: a.notNow, children: 'Not now' })
-        ]
-      })
-    ])
-  }
-
-  if (s.phase === 'done') {
-    return column([
-      jsx('div', { style: { fontSize: 22, fontWeight: 600, color: 'var(--ui-text-primary)' }, children: 'Nice one ✓' }),
-      jsx('div', { style: { ...S.muted, fontSize: 13 }, children: `${ex.name} done. Roll your shoulders and carry on.` }),
-      jsx(RepDots, { total: ex.reps.length, current: s.rep, done: true }),
-      jsx(TextButton, { onClick: a.startStretch, children: 'Again' })
-    ])
-  }
-
-  const paused = s.pausedAt != null
-  const repInfo = ex.reps[s.rep]
-  const nextRep = ex.reps[s.rep + 1]
-  const cue =
-    s.phase === 'prep'
-      ? `First: ${repInfo.label.toLowerCase()}. ${repInfo.cue}`
-      : s.phase === 'rest'
-        ? `Slowly bring your head back to centre. Next: ${nextRep.label.toLowerCase()}.`
-        : repInfo.cue
-  return column([
-    jsxs('div', {
-      style: { display: 'grid', gap: 2 },
-      children: [
-        title,
-        jsx('div', { style: { ...S.muted, fontSize: 12 }, children: `Rep ${s.rep + 1} of ${ex.reps.length} · ${repInfo.label}` })
-      ]
-    }),
-    jsx(Ring, {
-      progress: phaseProgress(s, ex, now),
-      seconds: Math.ceil(remainingMs(s, now) / 1000),
-      caption: paused ? 'paused' : PHASE_CAPTION[s.phase],
-      dim: paused
-    }),
-    jsx('div', { style: { fontSize: 14, color: 'var(--ui-text-secondary)', minHeight: 40 }, children: cue }),
-    jsx(RepDots, { total: ex.reps.length, current: s.rep, done: false }),
-    jsxs('div', {
-      style: { display: 'flex', alignItems: 'center', gap: 14 },
-      children: [
-        jsx(Button, { variant: 'secondary', onClick: paused ? a.resumeStretch : a.pauseStretch, children: paused ? 'Resume' : 'Pause' }),
-        jsx(TextButton, { onClick: a.skipStretch, children: 'Skip' }),
-        jsx(TextButton, { onClick: a.stopStretch, children: 'Stop' })
-      ]
-    })
-  ])
+  useFadeOnChange(ref, large)
+  return jsx('div', {
+    ref,
+    style: { width: '100%', fontSize: 12 },
+    children: large
+      ? jsx(StretchLarge, { model, chrome, wide: width == null || width >= WIDE_MIN_PX })
+      : jsx(StretchCompact, { model, chrome })
+  })
 }
 
-// ── PROTOTYPE: composer placements ───────────────────────────────────────────
-
-const MINI_RING = 52
+// ── PROTOTYPE: placement switch ──────────────────────────────────────────────
 
 /** PROTOTYPE: in-panel switch — cycles to the next placement. */
 function PlacementCycle({ model }) {
@@ -710,104 +871,18 @@ function PlacementCycle({ model }) {
 }
 
 /**
- * Compact horizontal stretch card in COMPOSER_AREAS.underside: below the input
- * box, outside its frame. Note: it's still inside the chat pane, so the app's
- * focus-follows-hover keeps the input box focused while you use it.
+ * COMPOSER_AREAS.underside: below the input box, outside its frame. It's still
+ * inside the chat pane, so the app's focus-follows-hover keeps the input box
+ * focused while you use it.
  */
-function CompactCard({ model }) {
-  const ex = EXERCISE
-  const s = useValue(model.$routine)
-  const ui = useValue(model.$ui)
+function ComposerCard({ model }) {
   const closing = useValue(model.$closing)
   const rootRef = useRef(null)
   usePaneMotion(rootRef, closing)
-  useTicker(isTimed(s) && s.pausedAt == null, 200)
-  const a = model.actions
-  const now = Date.now()
-  const paused = s.pausedAt != null
-  const totalSec = Math.round((ex.holdMs * ex.reps.length) / 1000)
-  const mini = props => jsx(Ring, { size: MINI_RING, stroke: 4, ...props })
-  const primary = (label, onClick) => jsx(Button, { size: 'sm', onClick, children: label })
-
-  let ring, heading, sub, actions
-  if (s.phase === 'offer') {
-    ring = mini({ progress: phaseProgress(s, ex, now), seconds: Math.ceil(remainingMs(s, now) / 1000) })
-    heading = 'Quick stretch while Hermes works?'
-    sub = `${ex.name} · first: ${ex.reps[0].label.toLowerCase()}. Starting in a moment.`
-    actions = [primary('Start now', a.skipStretch), jsx(TextButton, { onClick: a.notNow, children: 'Not now' })]
-  } else if (s.phase === 'done') {
-    ring = mini({ progress: 1, seconds: '✓' })
-    heading = 'Nice one'
-    sub = `${ex.name} done. Roll your shoulders and carry on.`
-    actions = [jsx(TextButton, { onClick: a.startStretch, children: 'Again' }), jsx(TextButton, { onClick: a.hidePane, children: 'Hide' })]
-  } else if (isTimed(s)) {
-    const rep = ex.reps[s.rep]
-    const next = ex.reps[s.rep + 1]
-    ring = mini({ progress: phaseProgress(s, ex, now), seconds: Math.ceil(remainingMs(s, now) / 1000), dim: paused })
-    heading = paused ? `${ex.name} · paused` : `${ex.name} · ${rep.label}`
-    sub =
-      s.phase === 'prep'
-        ? `Get ready: ${rep.label.toLowerCase()}. ${rep.cue}`
-        : s.phase === 'rest'
-          ? `Back to centre. Next: ${next.label.toLowerCase()}.`
-          : rep.cue
-    actions = [
-      jsx(Button, { size: 'sm', variant: 'secondary', onClick: paused ? a.resumeStretch : a.pauseStretch, children: paused ? 'Resume' : 'Pause' }),
-      jsx(TextButton, { onClick: a.skipStretch, children: 'Skip' }),
-      jsx(TextButton, { onClick: a.stopStretch, children: 'Stop' })
-    ]
-  } else {
-    ring = mini({ progress: 0, seconds: '' })
-    heading = ui.offered ? 'Quick stretch while Hermes works?' : ex.name
-    sub = `${ex.summary} ${ex.reps.length} × ${ex.holdMs / 1000}s · about ${totalSec + 5}s.`
-    actions = [primary('Start', a.startStretch), jsx(TextButton, { onClick: a.notNow, children: ui.offered ? 'Not now' : 'Hide' })]
-  }
-
-  return jsxs('div', {
+  return jsx('div', {
     ref: rootRef,
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 12,
-      width: '100%', // the underside strip is a wrapping flex row
-      padding: '4px 8px 2px',
-      fontSize: 12
-    },
-    children: [
-      ring,
-      jsxs('div', {
-        style: { flex: 1, minWidth: 0, display: 'grid', gap: 2 },
-        children: [
-          jsxs('div', {
-            style: { display: 'flex', alignItems: 'center', gap: 8 },
-            children: [
-              jsx('span', { style: { fontSize: 13, fontWeight: 600, color: 'var(--ui-text-primary)' }, children: heading }),
-              isTimed(s) && s.phase !== 'offer' ? jsx(RepDots, { total: ex.reps.length, current: s.rep, done: false }) : null
-            ]
-          }),
-          jsx('div', { style: { color: 'var(--ui-text-secondary)', lineHeight: 1.4 }, children: sub })
-        ]
-      }),
-      jsx('div', { style: { display: 'flex', alignItems: 'center', gap: 12, flex: 'none' }, children: [...actions, jsx(PlacementCycle, { model }, 'placement')] })
-    ]
-  })
-}
-
-/** One-line agent status for the pane's top bar. */
-function AgentStatus({ model }) {
-  const { busy, elapsed, rec } = useFocusedStatus(model.$activity)
-  const bySession = useValue(model.$bySession)
-  const elsewhere = !busy && anyBusy(bySession)
-  const text = busy
-    ? `Hermes is working${elapsed != null ? ` · ${formatDuration(elapsed)}` : ''}`
-    : elsewhere
-      ? 'Hermes is working in another chat'
-      : rec && rec.lastDurationMs != null
-        ? `Hermes finished · took ${formatDuration(rec.lastDurationMs)}`
-        : 'Hermes is idle'
-  return jsxs('span', {
-    style: { display: 'inline-flex', alignItems: 'center', gap: 8, ...S.muted },
-    children: [jsx(Dot, { on: busy || elsewhere }), jsx('span', { style: S.mono, children: text })]
+    style: { width: '100%', padding: '6px 8px 4px' }, // the underside strip is a wrapping flex row
+    children: jsx(StretchBody, { model })
   })
 }
 
@@ -845,10 +920,7 @@ function StretchPane({ model }) {
   const bar = jsxs('div', {
     style: { display: 'flex', alignItems: 'center', gap: 12 },
     children: [
-      jsx(AgentStatus, { model }),
-      DEV.keepPaneOpen
-        ? jsx('span', { style: { ...S.faint, ...S.mono }, children: `· dev ${DEV_BUILD}: always open` })
-        : null,
+      DEV.keepPaneOpen ? jsx('span', { style: { ...S.faint, ...S.mono }, children: `dev ${DEV_BUILD}: always open` }) : null,
       jsx('span', { style: { flex: 1 } }),
       jsx(PlacementCycle, { model }),
       jsx('span', { style: S.faint, children: '·' }),
@@ -860,7 +932,15 @@ function StretchPane({ model }) {
   return jsxs('div', {
     ref: rootRef,
     style: { height: '100%', padding: 12, display: 'flex', flexDirection: 'column', gap: 10, fontSize: 12 },
-    children: [bar, ui.view === 'debug' ? jsx(DebugView, { model }) : jsx(StretchView, { model })]
+    children: [
+      bar,
+      ui.view === 'debug'
+        ? jsx(DebugView, { model })
+        : jsx('div', {
+            style: { flex: 1, minHeight: 0, overflow: 'auto', display: 'grid', alignItems: 'center' },
+            children: jsx(StretchBody, { model, chrome: false })
+          })
+    ]
   })
 }
 
@@ -967,7 +1047,7 @@ export default {
     const composerBelow = {
       id: 'composer-below',
       area: COMPOSER_AREAS.underside,
-      render: () => jsx(CompactCard, { model })
+      render: () => jsx(ComposerCard, { model })
     }
     const surfaceFor = placement => (placement === 'pane' ? [paneContribution] : [composerBelow])
     let mountedPlacement = null

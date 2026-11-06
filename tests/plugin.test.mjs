@@ -299,7 +299,7 @@ test('render: chip, every pane phase, debug view and settings page render', () =
   actions.setView('debug')
   pane()
   renderTree(ctx.settingsPages[0].render(), seen)
-  for (const name of ['StatusChip', 'Dot', 'StretchPane', 'StretchView', 'Ring', 'RepDots', 'DebugView', 'AgentStatus', 'SettingsPage']) {
+  for (const name of ['StatusChip', 'Dot', 'StretchPane', 'StretchBody', 'StretchCompact', 'StretchLarge', 'RoutineBar', 'Bar', 'Figure', 'DebugView', 'SettingsPage']) {
     assert.ok(seen.includes(name), `rendered ${name}`)
   }
   ctx.dispose()
