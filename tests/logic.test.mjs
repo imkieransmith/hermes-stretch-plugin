@@ -298,6 +298,8 @@ test('box breathing: 4 rounds of in / hold / out / hold, 4 s each', () => {
   assert.equal(currentRound(s, ex), 1)
   assert.equal(ex.roundText(1), 'Round 2 of 4')
   assert.equal(Math.ceil(remainingMs(s, PREP_MS + 4_000 * 5 + 1) / 1000), 4, 'counts each step down 4, 3, 2, 1')
+  assert.equal(phases(skipRoutine(s, ex, 30_000)), 'step:8', 'skip jumps the rest of the breath, to the next round')
+  assert.equal(skipRoutine(tickRoutine(s, ex, PREP_MS + 4_000 * 12 + 1), ex, 70_000).phase, 'done', 'skipping the last breath finishes')
   const segs = routineSegments(s, ex, PREP_MS + 4_000 * 5 + 1)
   assert.deepEqual(segs.map(x => x.round), [0, 1, 2, 3], 'one bar segment per round')
   assert.equal(segs[0].fill, 1)

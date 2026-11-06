@@ -87,7 +87,7 @@ export const PLACEMENTS = [
  */
 export const DEV = { keepPaneOpen: true }
 /** DEV ONLY — bump on each change so a stale hot reload is obvious in the UI. */
-const DEV_BUILD = 'b29'
+const DEV_BUILD = 'b33'
 /** Exit animation length; the pane is unregistered when it completes. */
 export const EXIT_MS = 220
 const ENTER_MS = 280
@@ -372,7 +372,9 @@ export const OFFER_MS = 5_000
  *     cue    the instruction under the bar
  *     pose   what the figure shows during the step
  *     round  index into `rounds` (bar segment + "Rep 1 of 2"); null = an
- *            in-between step (a rest) with its own unlabelled bar segment
+ *            in-between step (a rest) with its own bar segment
+ *     barLabel  a rest's short label under its bar segment ("switch");
+ *            falls back to `label`
  *     between  true = a get-ready between rounds ("switch sides"): it
  *            sounds like the get-ready, not like a stretch
  *   rounds: bar labels, one per round (null = no label row)
@@ -393,7 +395,7 @@ export const NECK_TILT = {
   roundText: i => `Rep ${i + 1} of 2 · ${['Left', 'Right'][i]} side`,
   steps: [
     { ms: 20_000, label: 'seconds left', pose: 'left', round: 0, cue: 'Let your head tilt toward your left shoulder. Don’t pull it.' },
-    { ms: REST_MS, label: 'switch sides', pose: 'centre', round: null, between: true, cue: 'Slowly bring your head back to centre. Next: right side.' },
+    { ms: REST_MS, label: 'switch sides', pose: 'centre', round: null, between: true, barLabel: 'switch', cue: 'Slowly bring your head back to centre. Next: right side.' },
     { ms: 20_000, label: 'seconds left', pose: 'right', round: 1, cue: 'Let your head tilt toward your right shoulder. Don’t pull it.' }
   ]
 }
@@ -494,8 +496,17 @@ export function resumeRoutine(s, now) {
 }
 
 /** Skip the rest of the current phase (unpauses). On an offer: start now. */
+/**
+ * Skip: to the end of the current bar segment. A whole round goes at once
+ * (a breath's in/hold/out/hold is one segment), a rest is its own segment,
+ * and the get-ready (no segment) skips to the first step.
+ */
 export function skipRoutine(s, ex, now) {
-  return isTimed(s) ? advanceRoutine(s, ex, now) : s
+  if (!isTimed(s)) return s
+  const round = s.phase === 'step' ? ex.steps[s.step].round : null
+  let next = advanceRoutine(s, ex, now)
+  while (round != null && next.phase === 'step' && ex.steps[next.step].round === round) next = advanceRoutine(next, ex, now)
+  return next
 }
 
 export function remainingMs(s, now) {
@@ -566,8 +577,9 @@ export function currentPose(s, ex) {
 
 /**
  * The routine bar: one segment per round (a rest between rounds gets its
- * own), weighted by duration, each filled 0 → 1.
- * @returns {{ round: number | null, weight: number, fill: number }[]}
+ * own), weighted by duration, each filled 0 → 1. `first`/`last` are the step
+ * indexes it covers; `label` is a rest's bar label (rounds use ex.rounds).
+ * @returns {{ round: number | null, weight: number, fill: number, first: number, last: number, label: string | null }[]}
  */
 export function routineSegments(s, ex, now) {
   const p = phaseProgress(s, ex, now)
@@ -578,9 +590,10 @@ export function routineSegments(s, ex, now) {
     if (last && st.round != null && last.round === st.round) {
       last.filled += fill * st.ms
       last.weight += st.ms
-    } else out.push({ round: st.round, weight: st.ms, filled: fill * st.ms })
+      last.last = i
+    } else out.push({ round: st.round, weight: st.ms, filled: fill * st.ms, first: i, last: i, label: st.round == null ? st.barLabel || st.label : null })
   })
-  return out.map(({ round, weight, filled }) => ({ round, weight, fill: filled / weight }))
+  return out.map(({ filled, ...seg }) => ({ ...seg, fill: filled / seg.weight }))
 }
 
 // ── Sound ───────────────────────────────────────────────────────────────────
@@ -1223,7 +1236,7 @@ function Figure({ pose, size }) {
   })
 }
 
-/** Thin progress bar; `fill` 0 → 1. */
+/** Progress bar; `fill` 0 → 1. */
 function Bar({ fill, dim = false, height = 4 }) {
   return jsx('div', {
     style: { flex: 1, minWidth: 0, height, borderRadius: 999, background: 'var(--ui-stroke-secondary)', overflow: 'hidden' },
@@ -1240,36 +1253,71 @@ function Bar({ fill, dim = false, height = 4 }) {
   })
 }
 
-/** The routine bar, with round labels (Left / Right) under it if the exercise has them. */
+/**
+ * Space above each block of the large card: title + cue (a pair, close
+ * together), then count, bar, buttons. Uneven on purpose: each evens out the
+ * blank space a block's font leaves above/below its letters, so the VISIBLE
+ * gaps come out even (measured from rendered pixels): ~8px inside the pair,
+ * ~20px between blocks.
+ */
+const LARGE_GAPS = { cue: 4, count: 10, bar: 14, buttons: 20 }
+
+/** Routine bar thickness, and the gap between its segments. */
+const ROUTINE_BAR_PX = 6
+const ROUTINE_GAP_PX = 6
+/** A labelled rest segment ("Switch") is never narrower than this. */
+const REST_SEG_MIN_PX = 64
+
+/** Sentence-case a step label for display ("switch sides" → "Switch sides"). */
+const sentence = t => (t ? t[0].toUpperCase() + t.slice(1) : t)
+
+/**
+ * The routine bar, with labels under it if the exercise has them: Left /
+ * Right for the rounds, and the rest's own short label (Switch). The segment
+ * you're in has the stronger label. Each segment is a column (bar over
+ * label), so a label always sits under its own bar.
+ */
 function RoutineBar({ s, ex, now }) {
   const segs = routineSegments(s, ex, now)
   const paused = s.pausedAt != null
-  const current = currentRound(s, ex)
   const labelled = ex.rounds.some(Boolean)
-  const row = render =>
-    jsx('div', {
-      style: { display: 'flex', gap: 4 },
-      children: segs.map((seg, i) => jsx('div', { style: { flex: `${seg.weight} 1 0`, minWidth: 0, display: 'flex' }, children: render(seg) }, i))
-    })
-  return jsxs('div', {
-    style: { display: 'grid', gap: 6, width: '100%', maxWidth: 440 },
-    children: [
-      row(seg => jsx(Bar, { fill: seg.fill, dim: paused })),
-      labelled
-        ? row(seg =>
-            seg.round != null && ex.rounds[seg.round]
+  const at = s.phase === 'step' ? s.step : 0
+  const labelOf = seg => (seg.round != null ? ex.rounds[seg.round] : sentence(seg.label))
+  return jsx('div', {
+    role: 'group',
+    'aria-label': ex.roundText(currentRound(s, ex)),
+    style: { display: 'flex', gap: ROUTINE_GAP_PX, width: '100%', maxWidth: 440 },
+    children: segs.map((seg, i) => {
+      const rest = seg.round == null
+      const current = at >= seg.first && at <= seg.last
+      return jsxs(
+        'div',
+        {
+          style: {
+            flex: `${seg.weight} 1 0`,
+            minWidth: rest && labelled ? REST_SEG_MIN_PX : 0,
+            display: 'grid',
+            gap: 6
+          },
+          children: [
+            jsx('div', { style: { display: 'flex' }, children: jsx(Bar, { fill: seg.fill, dim: paused, height: ROUTINE_BAR_PX }) }),
+            labelled && labelOf(seg)
               ? jsx('span', {
                   style: {
                     fontSize: 12,
-                    color: seg.round === current ? 'var(--ui-text-primary)' : 'var(--ui-text-secondary)',
-                    whiteSpace: 'nowrap'
+                    color: current ? 'var(--ui-text-primary)' : 'var(--ui-text-secondary)',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis'
                   },
-                  children: ex.rounds[seg.round]
+                  children: labelOf(seg)
                 })
               : null
-          )
-        : null
-    ]
+          ]
+        },
+        i
+      )
+    })
   })
 }
 
@@ -1388,18 +1436,13 @@ function StretchLarge({ model, s, now, stacked, onTile }) {
 
   const body = jsxs('div', {
     ref: bodyRef,
-    style: { flex: '1 1 0', minWidth: 0, alignSelf: stacked ? 'stretch' : 'auto', display: 'grid', alignContent: 'center', gap: 10 },
+    style: { flex: '1 1 0', minWidth: 0, alignSelf: stacked ? 'stretch' : 'auto', display: 'grid', alignContent: 'center' },
     children: [
-      jsxs('div', {
-        style: { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '2px 10px' },
-        children: [
-          jsx('span', { style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' }, children: ex.name }),
-          jsx('span', { style: { ...S.sub, fontSize: 13 }, children: ex.roundText(currentRound(s, ex)) })
-        ]
-      }),
+      jsx('div', { style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' }, children: ex.name }),
+      jsx('div', { ref: cueRef, style: { fontSize: 14, color: 'var(--ui-text-secondary)', lineHeight: 1.45, marginTop: LARGE_GAPS.cue }, children: cue }),
       jsxs('div', {
         ref: countRef,
-        style: { display: 'flex', alignItems: 'baseline', gap: 10 },
+        style: { display: 'flex', alignItems: 'baseline', gap: 10, marginTop: LARGE_GAPS.count },
         children: [
           jsx('span', {
             style: {
@@ -1418,10 +1461,9 @@ function StretchLarge({ model, s, now, stacked, onTile }) {
           jsx('span', { style: { ...S.sub, fontSize: 13 }, children: paused ? 'paused' : step ? step.label : 'get ready' })
         ]
       }),
-      jsx(RoutineBar, { s, ex, now }),
-      jsx('div', { ref: cueRef, style: { fontSize: 14, color: 'var(--ui-text-secondary)', lineHeight: 1.45 }, children: cue }),
+      jsx('div', { style: { marginTop: LARGE_GAPS.bar }, children: jsx(RoutineBar, { s, ex, now }) }),
       jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', gap: 8 },
+        style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: LARGE_GAPS.buttons },
         children: [
           jsx(Button, { variant: 'secondary', onClick: paused ? a.resumeStretch : a.pauseStretch, children: paused ? 'Resume' : 'Pause' }),
           jsx(QuietButton, { onClick: a.skipStretch, children: 'Skip' }),
