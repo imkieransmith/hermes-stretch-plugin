@@ -70,9 +70,26 @@ Out of scope:
 - **No DOM reach-in.** Don't query or modify app markup, use
   `document.body` observers, inject `<style>` tags or patch prototypes. Use
   SDK surfaces only (catalog rule 8).
-- **No hardcoded colours.** Use theme variables only (`var(--ui-accent)`,
-  `var(--ui-text-secondary|tertiary|quaternary)`,
-  `var(--ui-stroke-secondary)`). Leave pane backgrounds alone.
+- **Follow Hermes' design system:** `docs/hermes/desktop-DESIGN.md` is a
+  copy of `apps/desktop/DESIGN.md`. Use core primitives, not hand-rolled ones:
+  - `Button` with `variant`: `default` for primary, `secondary` for soft
+    fill, `text` with `size: 'inline'` for quiet inline actions like
+    "Skip" / "Not now", plus `ghost`, `outline` and others.
+  - `SegmentedControl` for small either/or choices; its options are
+    `{ id, label }`.
+  - `ToggleRow` / `ListRow` for settings rows.
+  - `Tip` for tooltips. **Never** use native `title=` on buttons; a test
+    enforces this.
+  - Use sentence-case labels.
+  - Use `--ui-stroke-tertiary` for in-panel dividers and `--ui-text-primary`
+    for headings.
+  - Use `--font-sans` / `--font-mono` and the `--radius-*` / `--shadow-*`
+    tokens.
+  - Tips only where hover teaches something new.
+  - Keep surfaces flat, with no card-in-card.
+- **No hardcoded colours.** Use theme variables only: `--ui-text-*`,
+  `--ui-stroke-*`, `--ui-bg-*`, `--ui-accent`, and `--ui-green/red/…` for
+  status. The full list is in the app's `styles.css`. Leave pane backgrounds alone.
   - Prefer inline styles over Tailwind classes. Only classes the app itself
     uses are guaranteed to exist.
 - **Cleanup**
@@ -142,6 +159,12 @@ Keep the desktop half at `desktop/plugin.js`, **not** the repo root. A root
 - `hermes plugins doctor stretch-break` warns if Desktop runs a stale copy.
 - Closing the plugin's only pane through the layout (tab ✕ / ⌘W)
   **disables the plugin**. Always offer our own hide/dismiss control.
+- **Placement:** the stretch shows as a compact card in
+  `COMPOSER_AREAS.underside` (below the input box). The bottom pane is kept
+  behind a prototype switch and hosts the debug view. The full write-up of
+  the pane and its transitions, and why the other placements were dropped,
+  is in `docs/notes/bottom-pane-and-placements.md`. Both surfaces share the
+  lifecycle below.
 - **Pane lifecycle:** the pane contribution only exists while it should
   show. It's added with `ctx.register(...)` when work starts and removed via
   its disposer after `HIDE_DELAY_MS` once all work ends. This mirrors core's
@@ -190,6 +213,12 @@ tails, and to paste back the output.
 
 1. Set **`DEV.keepPaneOpen = false`** in `desktop/plugin.js`. It's on during
    development so the pane is always visible.
+   - The `DEV_BUILD` label only shows while `keepPaneOpen` is on. Bump it
+     on every change during development so a stale hot reload is obvious.
+   - Resolve the **placement prototype**: keep one placement and delete
+     `PLACEMENTS`, `settings.placement`, the "Placement (prototype)"
+     settings row, the ⌘K "Next placement" and "Preview an offer" commands,
+     and the unused surface components.
 2. Set `homepage`, `requires_hermes` (SemVer floor = tested version), and
    `version` in `plugin.yaml`. The user is testing on Hermes v0.22.7.
 3. Open a PR adding `plugin-catalog/stretch-break.yaml` to

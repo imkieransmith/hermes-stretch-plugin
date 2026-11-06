@@ -208,3 +208,9 @@ test('desktop/plugin.js only imports the three allowed specifiers', () => {
   assert.doesNotMatch(src, /\bimport\s*\(/, 'no dynamic import()')
   assert.equal(plugin.id, 'stretch-break')
 })
+
+test('no native title= on buttons (Hermes DESIGN.md; core has the same test)', () => {
+  const src = readFileSync(new URL('../desktop/plugin.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(src, /jsxs?\(\s*Button,\s*\{[^}]*\btitle:/, 'Button with title')
+  assert.doesNotMatch(src, /jsxs?\(\s*'button',\s*\{[^}]*\btitle:/, 'button with title')
+})

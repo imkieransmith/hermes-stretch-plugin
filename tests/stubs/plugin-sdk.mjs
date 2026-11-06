@@ -41,6 +41,13 @@ export const host = {
 export const useValue = a => a.get()
 export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' }
 export const PALETTE_AREA = 'palette'
+export const COMPOSER_AREAS = {
+  top: 'composer.top',
+  bottom: 'composer.bottom',
+  underside: 'composer.underside',
+  leading: 'composer.leading',
+  actions: 'composer.actions'
+}
 export const Button = () => null
 export const Tip = ({ children }) => children
 export const ListRow = () => null

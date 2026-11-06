@@ -4,8 +4,10 @@ A Hermes Desktop plugin that turns agent waiting time into a short, gentle,
 guided desk-stretch break.
 
 > **Status: proof of concept done; now polishing.** When a task has used a
-> tool and run for 10 s, a pane slides in below the chat offering a short
-> guided neck stretch, with a cooldown and user settings.
+> tool and run for 10 s, a compact card appears below the input box offering
+> a short guided neck stretch, with a cooldown and user settings. (A bottom
+> pane is still available via the in-panel "Placement" switch while we
+> decide; see `docs/notes/bottom-pane-and-placements.md`.)
 
 Entry for the Nous Research Hermes Agent Plugin Hackathon (deadline
 Nov 11 2026, 5 PM EST).

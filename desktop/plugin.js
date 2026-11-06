@@ -3,11 +3,13 @@
  *
  * What it does:
  *   - Status-bar chip: Idle / Working (+ elapsed) for the focused chat; click
- *     to open/close the pane by hand.
- *   - When a task has used a tool and run `offerDelaySec`, a pane slides in
- *     below the chat offering a short guided stretch (auto-start countdown or
- *     Start button), subject to a cooldown. A stretch underway keeps the pane
- *     up after Hermes finishes.
+ *     to show/hide the stretch by hand.
+ *   - When a task has used a tool and run `offerDelaySec`, a compact card
+ *     appears below the input box (COMPOSER_AREAS.underside) offering a short
+ *     guided stretch (auto-start countdown or Start button), subject to a
+ *     cooldown. A stretch underway stays up after Hermes finishes.
+ *     (The older bottom pane is still selectable while we decide; see
+ *     docs/notes/bottom-pane-and-placements.md.)
  *   - Settings ▸ Plugins ▸ Stretch Break: offers on/off, delay, auto-start,
  *     cooldown (ctx.storage).
  *   - A debug view (turn transitions, gateway events) for development.
@@ -30,6 +32,7 @@ import {
   pluginSettingsHref,
   STATUSBAR_AREAS,
   PALETTE_AREA,
+  COMPOSER_AREAS,
   Button,
   ListRow,
   SegmentedControl,
@@ -53,12 +56,28 @@ const PANE_HEIGHT = '50vh'
 export const HIDE_DELAY_MS = 2500
 
 /**
+ * PROTOTYPE — where the stretch UI lives (Settings / ⌘K toggle while we pick one):
+ *   below — compact card in the composer's underside strip, below the input
+ *           box and outside its frame (chosen)
+ *   pane  — pane docked below the conversation (the original; still hosts
+ *           the debug view)
+ * Tried and dropped: card above the input, offer pill, sidebar pane.
+ * See docs/notes/bottom-pane-and-placements.md.
+ */
+export const PLACEMENTS = [
+  ['below', 'Below input'],
+  ['pane', 'Bottom pane']
+]
+
+/**
  * DEV ONLY — keep the pane open at all times (never auto-hide), so UI work
  * doesn't need a running agent turn. `hide`/`stop` still reset the routine.
  * ⚠️ Set `keepPaneOpen: false` before committing a release / catalog pin.
  * (Mutable object so tests can switch it off.)
  */
 export const DEV = { keepPaneOpen: true }
+/** DEV ONLY — bump on each change so a stale hot reload is obvious in the UI. */
+const DEV_BUILD = 'b7'
 /** Exit animation length; the pane is unregistered when it completes. */
 export const EXIT_MS = 220
 const ENTER_MS = 280
@@ -155,7 +174,9 @@ export const DEFAULT_SETTINGS = {
   /** Count down and start by itself, vs. wait for the Start button. */
   autoStart: true,
   /** No automatic offer within this long of the last break (0 = every task). */
-  cooldownMin: 20
+  cooldownMin: 20,
+  /** PROTOTYPE: which surface shows the stretch (see PLACEMENTS). */
+  placement: 'below'
 }
 export const OFFER_DELAY_CHOICES = [10, 20, 30, 60]
 export const COOLDOWN_CHOICES = [0, 10, 20, 30, 45]
@@ -169,6 +190,7 @@ export function normalizeSettings(raw) {
     const n = raw[key]
     if (typeof n === 'number' && Number.isFinite(n) && n >= 0) s[key] = n
   }
+  if (PLACEMENTS.some(([id]) => id === raw.placement)) s.placement = raw.placement
   return s
 }
 
@@ -308,8 +330,8 @@ function clock(ts) {
 const S = {
   muted: { color: 'var(--ui-text-tertiary)' },
   faint: { color: 'var(--ui-text-quaternary)' },
-  mono: { fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontVariantNumeric: 'tabular-nums' },
-  section: { borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: 8 }
+  mono: { fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
+  section: { borderTop: '1px solid var(--ui-stroke-tertiary)', paddingTop: 8 }
 }
 
 function Dot({ on }) {
@@ -385,35 +407,14 @@ function Row({ label, value }) {
   })
 }
 
-/** Plain text button (Button's variant/size props aren't documented). */
-function TextButton({ active = false, onClick, children, title }) {
-  return jsx('button', {
-    type: 'button',
-    onClick,
-    title,
-    'aria-pressed': active,
-    style: {
-      background: 'none',
-      border: 'none',
-      padding: '0 2px',
-      cursor: 'pointer',
-      font: 'inherit',
-      color: active ? 'var(--ui-text-secondary)' : 'var(--ui-text-quaternary)',
-      textDecoration: active ? 'underline' : 'none',
-      textUnderlineOffset: 3
-    },
-    children
-  })
+/** Quiet inline action ("Skip", "Not now"): core Button, `text` variant (DESIGN.md). */
+function TextButton({ onClick, children }) {
+  return jsx(Button, { variant: 'text', size: 'inline', onClick, children })
 }
 
-/** Inline set of TextButtons acting as a segmented toggle. */
-function TextToggle({ value, onChange, options }) {
-  return jsx('span', {
-    style: { display: 'inline-flex', gap: 6 },
-    children: options.map(([v, label]) =>
-      jsx(TextButton, { active: value === v, onClick: () => onChange(v), children: label }, v)
-    )
-  })
+/** Small either/or choice: core SegmentedControl. `options` = [[id, label], …]. */
+function Choice({ value, onChange, options }) {
+  return jsx(SegmentedControl, { value, onChange, options: options.map(([id, label]) => ({ id, label })) })
 }
 
 function DebugView({ model }) {
@@ -445,9 +446,9 @@ function DebugView({ model }) {
         style: { ...S.muted, marginBottom: 4, display: 'flex', gap: 10 },
         children: [
           'Turns (newest first) ·',
-          jsx(TextToggle, { value: scope, onChange: setScope, options: [['chat', 'this chat'], ['all', 'all chats']] }),
+          jsx(Choice, { value: scope, onChange: setScope, options: [['chat', 'this chat'], ['all', 'all chats']] }),
           jsx('span', { style: { flex: 1 } }),
-          jsx(TextButton, { onClick: actions.clear, title: 'Clear the turn log and event counts', children: 'clear' })
+          jsx(TextButton, { onClick: actions.clear, children: 'Clear' })
         ]
       }),
       log.length === 0
@@ -516,27 +517,28 @@ const RING_SIZE = 168
 const RING_STROKE = 8
 
 /** Countdown ring: track + accent arc, seconds in the middle. */
-function Ring({ progress, seconds, caption, dim }) {
-  const r = (RING_SIZE - RING_STROKE) / 2
+function Ring({ progress, seconds, caption, dim, size = RING_SIZE, stroke = RING_STROKE }) {
+  const big = size >= 120
+  const r = (size - stroke) / 2
   const c = 2 * Math.PI * r
-  const circle = (stroke, extra) =>
+  const circle = (color, extra) =>
     jsx('circle', {
-      cx: RING_SIZE / 2,
-      cy: RING_SIZE / 2,
+      cx: size / 2,
+      cy: size / 2,
       r,
       fill: 'none',
-      stroke,
-      strokeWidth: RING_STROKE,
+      stroke: color,
+      strokeWidth: stroke,
       strokeLinecap: 'round',
       ...extra
     })
   return jsxs('div', {
-    style: { position: 'relative', width: RING_SIZE, height: RING_SIZE, flex: 'none' },
+    style: { position: 'relative', width: size, height: size, flex: 'none' },
     children: [
       jsxs('svg', {
-        width: RING_SIZE,
-        height: RING_SIZE,
-        viewBox: `0 0 ${RING_SIZE} ${RING_SIZE}`,
+        width: size,
+        height: size,
+        viewBox: `0 0 ${size} ${size}`,
         style: { transform: 'rotate(-90deg)' },
         'aria-hidden': 'true',
         children: [
@@ -552,10 +554,12 @@ function Ring({ progress, seconds, caption, dim }) {
         style: { position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', alignContent: 'center', gap: 2 },
         children: [
           jsx('div', {
-            style: { ...S.mono, fontSize: 40, fontWeight: 600, color: 'var(--ui-text-secondary)', lineHeight: 1 },
+            style: { ...S.mono, fontSize: big ? 40 : Math.round(size * 0.3), fontWeight: 600, color: 'var(--ui-text-primary)', lineHeight: 1 },
             children: seconds
           }),
-          jsx('div', { style: { ...S.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em' }, children: caption })
+          big && caption
+            ? jsx('div', { style: { ...S.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em' }, children: caption })
+            : null
         ]
       })
     ]
@@ -607,7 +611,7 @@ function StretchView({ model }) {
         children
       })
     })
-  const title = jsx('div', { style: { fontSize: 22, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-secondary)' }, children: ex.name })
+  const title = jsx('div', { style: { fontSize: 22, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' }, children: ex.name })
   const totalSec = Math.round((ex.holdMs * ex.reps.length) / 1000)
 
   if (s.phase === 'idle') {
@@ -622,7 +626,7 @@ function StretchView({ model }) {
         style: { display: 'flex', alignItems: 'center', gap: 14 },
         children: [
           jsx(Button, { onClick: a.startStretch, children: 'Start' }),
-          ui.offered ? jsx(TextButton, { onClick: a.notNow, title: 'Skip this break', children: 'not now' }) : null
+          ui.offered ? jsx(TextButton, { onClick: a.notNow, children: 'Not now' }) : null
         ]
       })
     ])
@@ -643,7 +647,7 @@ function StretchView({ model }) {
         style: { display: 'flex', alignItems: 'center', gap: 14 },
         children: [
           jsx(Button, { onClick: a.skipStretch, children: 'Start now' }),
-          jsx(TextButton, { onClick: a.notNow, title: 'Skip this break', children: 'not now' })
+          jsx(TextButton, { onClick: a.notNow, children: 'Not now' })
         ]
       })
     ])
@@ -651,10 +655,10 @@ function StretchView({ model }) {
 
   if (s.phase === 'done') {
     return column([
-      jsx('div', { style: { fontSize: 22, fontWeight: 600, color: 'var(--ui-text-secondary)' }, children: 'Nice one ✓' }),
+      jsx('div', { style: { fontSize: 22, fontWeight: 600, color: 'var(--ui-text-primary)' }, children: 'Nice one ✓' }),
       jsx('div', { style: { ...S.muted, fontSize: 13 }, children: `${ex.name} done. Roll your shoulders and carry on.` }),
       jsx(RepDots, { total: ex.reps.length, current: s.rep, done: true }),
-      jsx(TextButton, { onClick: a.startStretch, children: 'again' })
+      jsx(TextButton, { onClick: a.startStretch, children: 'Again' })
     ])
   }
 
@@ -686,12 +690,107 @@ function StretchView({ model }) {
     jsxs('div', {
       style: { display: 'flex', alignItems: 'center', gap: 14 },
       children: [
-        jsx(Button, { onClick: paused ? a.resumeStretch : a.pauseStretch, children: paused ? 'Resume' : 'Pause' }),
-        jsx(TextButton, { onClick: a.skipStretch, title: 'Skip to the next step', children: 'skip' }),
-        jsx(TextButton, { onClick: a.stopStretch, title: 'End this stretch and close', children: 'stop' })
+        jsx(Button, { variant: 'secondary', onClick: paused ? a.resumeStretch : a.pauseStretch, children: paused ? 'Resume' : 'Pause' }),
+        jsx(TextButton, { onClick: a.skipStretch, children: 'Skip' }),
+        jsx(TextButton, { onClick: a.stopStretch, children: 'Stop' })
       ]
     })
   ])
+}
+
+// ── PROTOTYPE: composer placements ───────────────────────────────────────────
+
+const MINI_RING = 52
+
+/** PROTOTYPE: in-panel switch — cycles to the next placement. */
+function PlacementCycle({ model }) {
+  const { placement } = useValue(model.$settings)
+  const label = (PLACEMENTS.find(([id]) => id === placement) || PLACEMENTS[0])[1]
+  return jsx(TextButton, { onClick: model.actions.nextPlacement, children: `Placement: ${label} →` })
+}
+
+/**
+ * Compact horizontal stretch card in COMPOSER_AREAS.underside: below the input
+ * box, outside its frame. Note: it's still inside the chat pane, so the app's
+ * focus-follows-hover keeps the input box focused while you use it.
+ */
+function CompactCard({ model }) {
+  const ex = EXERCISE
+  const s = useValue(model.$routine)
+  const ui = useValue(model.$ui)
+  const closing = useValue(model.$closing)
+  const rootRef = useRef(null)
+  usePaneMotion(rootRef, closing)
+  useTicker(isTimed(s) && s.pausedAt == null, 200)
+  const a = model.actions
+  const now = Date.now()
+  const paused = s.pausedAt != null
+  const totalSec = Math.round((ex.holdMs * ex.reps.length) / 1000)
+  const mini = props => jsx(Ring, { size: MINI_RING, stroke: 4, ...props })
+  const primary = (label, onClick) => jsx(Button, { size: 'sm', onClick, children: label })
+
+  let ring, heading, sub, actions
+  if (s.phase === 'offer') {
+    ring = mini({ progress: phaseProgress(s, ex, now), seconds: Math.ceil(remainingMs(s, now) / 1000) })
+    heading = 'Quick stretch while Hermes works?'
+    sub = `${ex.name} · first: ${ex.reps[0].label.toLowerCase()}. Starting in a moment.`
+    actions = [primary('Start now', a.skipStretch), jsx(TextButton, { onClick: a.notNow, children: 'Not now' })]
+  } else if (s.phase === 'done') {
+    ring = mini({ progress: 1, seconds: '✓' })
+    heading = 'Nice one'
+    sub = `${ex.name} done. Roll your shoulders and carry on.`
+    actions = [jsx(TextButton, { onClick: a.startStretch, children: 'Again' }), jsx(TextButton, { onClick: a.hidePane, children: 'Hide' })]
+  } else if (isTimed(s)) {
+    const rep = ex.reps[s.rep]
+    const next = ex.reps[s.rep + 1]
+    ring = mini({ progress: phaseProgress(s, ex, now), seconds: Math.ceil(remainingMs(s, now) / 1000), dim: paused })
+    heading = paused ? `${ex.name} · paused` : `${ex.name} · ${rep.label}`
+    sub =
+      s.phase === 'prep'
+        ? `Get ready: ${rep.label.toLowerCase()}. ${rep.cue}`
+        : s.phase === 'rest'
+          ? `Back to centre. Next: ${next.label.toLowerCase()}.`
+          : rep.cue
+    actions = [
+      jsx(Button, { size: 'sm', variant: 'secondary', onClick: paused ? a.resumeStretch : a.pauseStretch, children: paused ? 'Resume' : 'Pause' }),
+      jsx(TextButton, { onClick: a.skipStretch, children: 'Skip' }),
+      jsx(TextButton, { onClick: a.stopStretch, children: 'Stop' })
+    ]
+  } else {
+    ring = mini({ progress: 0, seconds: '' })
+    heading = ui.offered ? 'Quick stretch while Hermes works?' : ex.name
+    sub = `${ex.summary} ${ex.reps.length} × ${ex.holdMs / 1000}s · about ${totalSec + 5}s.`
+    actions = [primary('Start', a.startStretch), jsx(TextButton, { onClick: a.notNow, children: ui.offered ? 'Not now' : 'Hide' })]
+  }
+
+  return jsxs('div', {
+    ref: rootRef,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 12,
+      width: '100%', // the underside strip is a wrapping flex row
+      padding: '4px 8px 2px',
+      fontSize: 12
+    },
+    children: [
+      ring,
+      jsxs('div', {
+        style: { flex: 1, minWidth: 0, display: 'grid', gap: 2 },
+        children: [
+          jsxs('div', {
+            style: { display: 'flex', alignItems: 'center', gap: 8 },
+            children: [
+              jsx('span', { style: { fontSize: 13, fontWeight: 600, color: 'var(--ui-text-primary)' }, children: heading }),
+              isTimed(s) && s.phase !== 'offer' ? jsx(RepDots, { total: ex.reps.length, current: s.rep, done: false }) : null
+            ]
+          }),
+          jsx('div', { style: { color: 'var(--ui-text-secondary)', lineHeight: 1.4 }, children: sub })
+        ]
+      }),
+      jsx('div', { style: { display: 'flex', alignItems: 'center', gap: 12, flex: 'none' }, children: [...actions, jsx(PlacementCycle, { model }, 'placement')] })
+    ]
+  })
 }
 
 /** One-line agent status for the pane's top bar. */
@@ -748,12 +847,14 @@ function StretchPane({ model }) {
     children: [
       jsx(AgentStatus, { model }),
       DEV.keepPaneOpen
-        ? jsx('span', { style: { ...S.faint, ...S.mono }, title: 'DEV.keepPaneOpen is on in desktop/plugin.js', children: '· dev: always open' })
+        ? jsx('span', { style: { ...S.faint, ...S.mono }, children: `· dev ${DEV_BUILD}: always open` })
         : null,
       jsx('span', { style: { flex: 1 } }),
-      jsx(TextToggle, { value: ui.view, onChange: setView, options: [['stretch', 'stretch'], ['debug', 'debug']] }),
+      jsx(PlacementCycle, { model }),
       jsx('span', { style: S.faint, children: '·' }),
-      jsx(TextButton, { onClick: hidePane, title: 'Hide until the next task', children: 'hide' })
+      jsx(Choice, { value: ui.view, onChange: setView, options: [['stretch', 'stretch'], ['debug', 'debug']] }),
+      jsx('span', { style: S.faint, children: '·' }),
+      jsx(TextButton, { onClick: hidePane, children: 'Hide' })
     ]
   })
   return jsxs('div', {
@@ -801,6 +902,15 @@ function SettingsPage({ model }) {
         title: 'Time between breaks',
         description: 'After a stretch (or skipping one), wait this long before offering another.',
         action: seg(s.cooldownMin, COOLDOWN_CHOICES, n => (n ? `${n}m` : 'none'), n => set({ cooldownMin: n }))
+      }),
+      jsx(ListRow, {
+        title: 'Placement (prototype)',
+        description: 'Where the stretch appears. Temporary, while we compare options.',
+        action: jsx(SegmentedControl, {
+          value: s.placement,
+          onChange: v => set({ placement: v }),
+          options: PLACEMENTS.map(([id, label]) => ({ id, label }))
+        })
       })
     ]
   })
@@ -852,6 +962,15 @@ export default {
       data: { placement: 'bottom', dock: { pane: 'workspace', pos: 'bottom' }, height: PANE_HEIGHT },
       render: () => jsx(StretchPane, { model })
     }
+    // PROTOTYPE placements (settings.placement). Each is just a different set
+    // of contributions; the show/hide lifecycle below is shared.
+    const composerBelow = {
+      id: 'composer-below',
+      area: COMPOSER_AREAS.underside,
+      render: () => jsx(CompactCard, { model })
+    }
+    const surfaceFor = placement => (placement === 'pane' ? [paneContribution] : [composerBelow])
+    let mountedPlacement = null
     let disposePane = null
     let cancelGrace = null
     let cancelExit = null
@@ -866,7 +985,9 @@ export default {
         $closing.set(false)
       }
       if (disposePane) return
-      disposePane = ctx.register(paneContribution)
+      mountedPlacement = $settings.get().placement
+      const disposers = surfaceFor(mountedPlacement).map(c => ctx.register(c))
+      disposePane = () => disposers.forEach(d => d())
       $paneOpen.set(true)
     }
     const beginExit = () => {
@@ -899,7 +1020,10 @@ export default {
     // A "spell" is a stretch of time where any chat is working. We offer at
     // most once per spell, once it has used a tool and run offerDelaySec.
     let spell = null // { startedAt, toolSeen, offered }
+    /** PROTOTYPE: a ⌘K preview offer is underway — don't let it start a cooldown. */
+    let previewing = false
     const markBreak = () => {
+      if (previewing) return
       lastBreakAt = Date.now()
       ctx.storage.set('lastBreakAt', lastBreakAt)
     }
@@ -908,6 +1032,7 @@ export default {
       const routine = $routine.get()
       if (!shouldOffer({ spell, settings: $settings.get(), lastBreakAt, routinePhase: routine.phase, now })) return
       spell.offered = true
+      previewing = false // a real offer supersedes a preview
       if ($settings.get().autoStart) $routine.set(offerRoutine(now))
       patchUi({ offered: true })
       syncPane()
@@ -974,7 +1099,10 @@ export default {
     let prevPhase = $routine.get().phase
     ctx.onDispose(
       $routine.listen(s => {
-        if (s.phase === 'done' && prevPhase !== 'done') markBreak() // finished a stretch
+        if (s.phase === 'done' && prevPhase !== 'done') {
+          markBreak() // finished a stretch
+          previewing = false
+        }
         prevPhase = s.phase
         syncPane() // start/end of a routine changes whether the pane is wanted
       })
@@ -986,6 +1114,7 @@ export default {
       // Closing an offer or a stretch counts as a break for the cooldown.
       const r = $routine.get()
       if ($ui.get().offered || isTimed(r)) markBreak()
+      previewing = false
       $routine.set(idleRoutine())
       patchUi({ pinned: false, offered: false })
       syncPane({ immediate: true })
@@ -998,12 +1127,39 @@ export default {
       $settings.set(normalizeSettings({ ...$settings.get(), ...patch }))
       ctx.storage.set('settings', $settings.get())
     }
+    // Placement changed while showing: swap surfaces in place (no exit anim).
+    ctx.onDispose(
+      $settings.listen(st => {
+        if (!disposePane || st.placement === mountedPlacement) return
+        cancelExit = stop(cancelExit)
+        $closing.set(false)
+        const dispose = disposePane
+        disposePane = null
+        dispose()
+        $paneOpen.set(false)
+        syncPane()
+      })
+    )
     Object.assign(model.actions, {
       hidePane,
       showPane,
       togglePane: () => (paneShowing() ? hidePane() : showPane()),
       setView: view => patchUi({ view }),
       updateSettings,
+      /** PROTOTYPE: cycle placements (in-panel switch and ⌘K). */
+      nextPlacement: () => {
+        const ids = PLACEMENTS.map(([id]) => id)
+        const next = ids[(ids.indexOf($settings.get().placement) + 1) % ids.length]
+        updateSettings({ placement: next })
+        if (!$ui.get().offered && !isRoutineActive($routine.get())) showPane('stretch') // something to look at
+      },
+      /** PROTOTYPE: show an offer now (no agent turn needed); never starts a cooldown. */
+      previewOffer: () => {
+        previewing = true
+        if ($settings.get().autoStart) $routine.set(offerRoutine(Date.now()))
+        patchUi({ offered: true, view: 'stretch' })
+        syncPane()
+      },
       startStretch: () => setRoutine((_, now) => startRoutine(EXERCISE, now)),
       pauseStretch: () => setRoutine(pauseRoutine),
       resumeStretch: () => setRoutine(resumeRoutine),
@@ -1039,8 +1195,13 @@ export default {
       palette('offers', 'Pause / resume stretch offers', () =>
         updateSettings({ offersEnabled: !$settings.get().offersEnabled })
       ),
+      palette('placement', 'Next placement (prototype)', model.actions.nextPlacement),
+      palette('preview', 'Preview an offer (prototype)', model.actions.previewOffer),
       palette('settings', 'Open settings', () => host.navigate(pluginSettingsHref(PLUGIN_ID))),
-      palette('debug', 'Show debug panel', () => showPane('debug')),
+      palette('debug', 'Show debug panel', () => {
+        updateSettings({ placement: 'pane' }) // the debug view lives in the pane
+        showPane('debug')
+      }),
       palette('clear', 'Clear activity log', model.actions.clear)
     ])
 

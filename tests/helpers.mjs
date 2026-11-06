@@ -53,7 +53,8 @@ export function fakeCtx(stored = {}) {
     },
     /** Raw view of what was persisted (for assertions / reloading). */
     stored: () => Object.fromEntries(storage),
-    pane: () => contributions.find(c => c.area === 'panes'),
+    /** Whichever stretch surface is showing (bottom pane or below-input card). */
+    pane: () => contributions.find(c => c.area === 'panes' || c.area === 'composer.underside'),
     /** Advance the clock by `ms`, firing timers and intervals on the way. */
     advance(ms) {
       const end = clock.t + ms

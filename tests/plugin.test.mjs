@@ -84,7 +84,7 @@ test('offer: tool use + 10s → pane with a countdown that starts the stretch', 
   assert.equal(ctx.pane(), undefined, 'not before the delay')
   ctx.advance(300)
   assert.ok(ctx.pane(), 'offered at 10s')
-  assert.equal(ctx.pane().data.height, '50vh')
+  assert.equal(ctx.pane().area, 'composer.underside', 'default: card below the input')
   assert.equal($routine.get().phase, 'offer')
   ctx.advance(OFFER_MS)
   assert.equal($routine.get().phase, 'hold', 'countdown → first hold')
@@ -275,8 +275,9 @@ test('settings: page registered; updates are normalised and persisted', () => {
 test('render: chip, every pane phase, debug view and settings page render', () => {
   host.state.busy.set(true)
   host.state.focusedSessionId.set('a')
-  const ctx = offered()
+  const ctx = offered({ settings: { placement: 'pane' } })
   const { actions, $routine } = modelOf(ctx)
+  assert.equal(ctx.pane().data.height, '50vh')
   const seen = []
   const pane = () => renderTree(ctx.pane().render(), seen)
   renderTree(ctx.contributions.find(c => c.id === 'chip').render(), seen)
@@ -301,5 +302,82 @@ test('render: chip, every pane phase, debug view and settings page render', () =
   for (const name of ['StatusChip', 'Dot', 'StretchPane', 'StretchView', 'Ring', 'RepDots', 'DebugView', 'AgentStatus', 'SettingsPage']) {
     assert.ok(seen.includes(name), `rendered ${name}`)
   }
+  ctx.dispose()
+})
+
+// ── PROTOTYPE placements ────────────────────────────────────────────────────
+
+const areasOf = ctx =>
+  ctx.contributions
+    .filter(c => c.area === 'panes' || c.area.startsWith('composer.'))
+    .map(c => `${c.area}:${c.id}`)
+    .sort()
+
+test('placement: below-input card by default; switching to the pane swaps in place', () => {
+  const ctx = offered()
+  const { actions } = modelOf(ctx)
+  assert.deepEqual(areasOf(ctx), ['composer.underside:composer-below'])
+  renderTree(ctx.contributions.find(c => c.id === 'composer-below').render())
+
+  actions.nextPlacement()
+  assert.deepEqual(areasOf(ctx), ['panes:pane'])
+  actions.nextPlacement()
+  assert.deepEqual(areasOf(ctx), ['composer.underside:composer-below'], 'cycles back round')
+
+  actions.notNow()
+  ctx.advance(EXIT_MS + 100)
+  assert.deepEqual(areasOf(ctx), [], 'hiding removes whichever surface is showing')
+  actions.updateSettings({ placement: 'pane' })
+  assert.deepEqual(areasOf(ctx), [], 'switching while hidden shows nothing')
+  ctx.dispose()
+})
+
+test('placement: dropped prototypes fall back to the below-input card', () => {
+  for (const placement of ['composer', 'pill', 'sidebar', 'nope']) {
+    const ctx = fakeCtx({ settings: { placement } })
+    plugin.register(ctx)
+    assert.equal(modelOf(ctx).$settings.get().placement, 'below')
+    ctx.dispose()
+  }
+})
+
+test('placement: "Show debug panel" switches to the pane', () => {
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  ctx.contributions.find(c => c.id === 'debug').data.run()
+  assert.equal(ctx.pane().area, 'panes')
+  assert.equal(modelOf(ctx).$ui.get().view, 'debug')
+  ctx.dispose()
+})
+
+test('placement: compact card renders every phase', () => {
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { actions } = modelOf(ctx)
+  actions.showPane()
+  const render = () => renderTree(ctx.contributions.find(c => c.id === 'composer-below').render())
+  render() // idle
+  actions.startStretch()
+  render() // prep
+  ctx.advance(3_100)
+  render() // hold
+  actions.pauseStretch()
+  render() // paused
+  actions.resumeStretch()
+  actions.skipStretch()
+  render() // rest
+  actions.skipStretch()
+  actions.skipStretch()
+  render() // done
+  ctx.dispose()
+})
+
+test('preview offer (⌘K) shows the offer but never starts a cooldown', () => {
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  ctx.contributions.find(c => c.id === 'preview').data.run()
+  assert.ok(ctx.pane(), 'preview shows the offer')
+  modelOf(ctx).actions.notNow()
+  assert.equal(ctx.stored().lastBreakAt, undefined)
   ctx.dispose()
 })

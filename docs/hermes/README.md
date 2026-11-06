@@ -8,6 +8,7 @@ anything surprising.
 |---|---|
 | `desktop-plugin-sdk.md` | https://hermes-agent.nousresearch.com/docs/developer-guide/desktop-plugin-sdk |
 | `plugins-guide.md` | https://hermes-agent.nousresearch.com/docs/developer-guide/plugins |
+| `desktop-DESIGN.md` | `apps/desktop/DESIGN.md` in NousResearch/hermes-agent (the desktop app's design system: principles, Button variants, tokens, motion) |
 | `desktop-plugins-skill-reference.md` | `skills/autonomous-ai-agents/hermes-agent/references/desktop-plugins.md` in NousResearch/hermes-agent (the agent-facing checklist) |
 
 Useful sections in `desktop-plugin-sdk.md` (grep the heading):
