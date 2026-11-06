@@ -113,6 +113,13 @@ Out of scope:
     not turn-busy.
 - **Don't block or interfere with the agent.** The plugin is purely
   observational and optional.
+  - The `tension` composer middleware must **always return the draft it was
+    given, unchanged**, and swallow its own errors. Never cancel a send,
+    never rewrite it, and never store or send message text anywhere. Keep
+    only `{ at, score }` in memory.
+  - Signal weights, the per-message cap and the threshold are constants
+    (`TENSION_WEIGHTS`, `TENSION_MESSAGE_MAX`, `TENSION_THRESHOLD`). Tune
+    those rather than adding special cases.
 - **No backend services, external APIs, AI calls or network fetches.**
 - **Python half** (when added)
   - No monkey-patching of Hermes internals.
@@ -169,6 +176,12 @@ Keep the desktop half at `desktop/plugin.js`, **not** the repo root. A root
   the pane and its transitions, and why the other placements were dropped,
   is in `docs/notes/bottom-pane-and-placements.md`. Both surfaces share the
   lifecycle below.
+- **Exercises are data.** `NECK_TILT` and `BOX_BREATHING` are lists of timed
+  steps (`{ ms, label, cue, pose, round }`) run by one routine engine
+  (`idle → offer | prep → step(i) → done`) and drawn by one card. The
+  routine state's `exId` says which exercise is showing. Add an exercise by
+  adding data to `EXERCISES`, not by adding phases. An audio exercise (body
+  scan) would be one step lasting the clip's length.
 - **Pane lifecycle:** the pane contribution only exists while it should
   show. It's added with `ctx.register(...)` when work starts and removed via
   its disposer after `HIDE_DELAY_MS` once all work ends. This mirrors core's

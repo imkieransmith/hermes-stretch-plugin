@@ -3,13 +3,16 @@ import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { clock, fakeCtx, modelOf, renderTree } from './helpers.mjs'
-import plugin, { DEV, EXERCISE, EXIT_MS, HIDE_DELAY_MS, OFFER_MS, REST_MS } from '../desktop/plugin.js'
+import plugin, { DEV, NECK_TILT, BOX_BREATHING, BREATHER_COOLDOWN_MIN, EXIT_MS, DONE_LINGER_MS, HIDE_DELAY_MS, OFFER_MS, REST_MS } from '../desktop/plugin.js'
 import { host } from '@hermes/plugin-sdk'
 
 // Tests exercise the real show/hide behaviour, not the dev "always open" mode.
 DEV.keepPaneOpen = false
 
 const busy = map => host.state.busyBySession.set(map)
+const HOLD = NECK_TILT.steps[0].ms
+/** Start → done for the neck tilt (get ready + every step). */
+const PREP_MS_TOTAL = 3_000 + NECK_TILT.steps.reduce((sum, st) => sum + st.ms, 0)
 
 beforeEach(() => {
   busy({})
@@ -87,7 +90,7 @@ test('offer: tool use + 10s → pane with a countdown that starts the stretch', 
   assert.equal(ctx.pane().area, 'composer.underside', 'default: card below the input')
   assert.equal($routine.get().phase, 'offer')
   ctx.advance(OFFER_MS)
-  assert.equal($routine.get().phase, 'hold', 'countdown → first hold')
+  assert.equal($routine.get().phase, 'step', 'countdown → first hold')
   ctx.dispose()
 })
 
@@ -150,7 +153,7 @@ test('offer: "not now" closes at once, starts the cooldown, and is once per spel
 
 test('offer: a completed stretch starts the cooldown, which persists across reloads', () => {
   const ctx = offered()
-  ctx.advance(OFFER_MS + 2 * EXERCISE.holdMs + 10_000) // countdown + both reps + rest
+  ctx.advance(OFFER_MS + 2 * HOLD + REST_MS + 100) // countdown + both reps + rest
   const { $routine } = modelOf(ctx)
   assert.equal($routine.get().phase, 'done')
   const stored = ctx.stored()
@@ -194,15 +197,59 @@ test('a stretch underway keeps the pane after Hermes finishes; done → linger �
   assert.ok(ctx.pane(), 'stays while stretching')
 
   // 10s left of hold 1, the switch, then hold 2 → exactly done.
-  ctx.advance(EXERCISE.holdMs - 10_000 + REST_MS + EXERCISE.holdMs)
+  ctx.advance(HOLD - 10_000 + REST_MS + HOLD)
   assert.equal($routine.get().phase, 'done')
-  ctx.advance(HIDE_DELAY_MS - 500)
-  assert.ok(ctx.pane(), '"Nice one" lingers')
+  ctx.advance(DONE_LINGER_MS - 500)
+  assert.ok(ctx.pane(), '"Well done" lingers')
+  assert.equal($routine.get().phase, 'done')
   ctx.advance(600)
   assert.equal($closing.get(), true, 'animating out')
+  assert.equal($routine.get().phase, 'done', 'still "well done" while it fades')
   ctx.advance(EXIT_MS)
   assert.equal(ctx.pane(), undefined)
+  assert.equal($routine.get().phase, 'idle', 'reset once gone')
   ctx.dispose()
+})
+
+test('well done: Close leaves at once; it leaves even if the card was opened by hand', () => {
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { $routine, $closing, actions } = modelOf(ctx)
+  actions.showPane() // opened by hand (pinned)
+  actions.startStretch()
+  ctx.advance(PREP_MS_TOTAL)
+  assert.equal($routine.get().phase, 'done')
+  renderTree(ctx.pane().render())
+  actions.dismissDone()
+  assert.equal($closing.get(), true, 'Close: straight to the exit fade')
+  ctx.advance(EXIT_MS + 100)
+  assert.equal(ctx.pane(), undefined)
+
+  actions.showPane()
+  actions.startStretch()
+  ctx.advance(PREP_MS_TOTAL + DONE_LINGER_MS + EXIT_MS + 200)
+  assert.equal(ctx.pane(), undefined, 'pinned or not, well done leaves by itself')
+  ctx.dispose()
+})
+
+test('DEV.keepPaneOpen: well done returns to the offer card, alternating exercises', () => {
+  DEV.keepPaneOpen = true
+  try {
+    const ctx = fakeCtx()
+    plugin.register(ctx)
+    const { $routine, actions } = modelOf(ctx)
+    assert.equal($routine.get().exId, 'neck-side-tilt')
+    actions.startStretch()
+    ctx.advance(PREP_MS_TOTAL + DONE_LINGER_MS + 200)
+    assert.equal($routine.get().phase, 'idle', 'back to the compact card')
+    assert.equal($routine.get().exId, 'box-breathing', 'next exercise')
+    assert.ok(ctx.pane(), 'never closes in dev')
+    actions.notNow()
+    assert.equal($routine.get().exId, 'neck-side-tilt', 'hiding also moves on')
+    ctx.dispose()
+  } finally {
+    DEV.keepPaneOpen = false
+  }
 })
 
 test('stop closes immediately (exit fade only) and resets the routine', () => {
@@ -299,7 +346,7 @@ test('render: chip, every pane phase, debug view and settings page render', () =
   actions.setView('debug')
   pane()
   renderTree(ctx.settingsPages[0].render(), seen)
-  for (const name of ['StatusChip', 'Dot', 'StretchPane', 'StretchBody', 'StretchCompact', 'StretchLarge', 'RoutineBar', 'Bar', 'Figure', 'DebugView', 'SettingsPage']) {
+  for (const name of ['StatusChip', 'Dot', 'StretchPane', 'StretchBody', 'StretchCompact', 'StretchLarge', 'RoutineBar', 'Bar', 'Figure', 'StretchDone', 'Tick', 'DebugView', 'SettingsPage']) {
     assert.ok(seen.includes(name), `rendered ${name}`)
   }
   ctx.dispose()
@@ -309,7 +356,7 @@ test('render: chip, every pane phase, debug view and settings page render', () =
 
 const areasOf = ctx =>
   ctx.contributions
-    .filter(c => c.area === 'panes' || c.area.startsWith('composer.'))
+    .filter(c => c.area === 'panes' || (c.area.startsWith('composer.') && c.area !== 'composer.middleware'))
     .map(c => `${c.area}:${c.id}`)
     .sort()
 
@@ -381,3 +428,178 @@ test('preview offer (⌘K) shows the offer but never starts a cooldown', () => {
   assert.equal(ctx.stored().lastBreakAt, undefined)
   ctx.dispose()
 })
+
+// ── breathers (tension → box breathing) ─────────────────────────────────────
+
+/** The middleware handler, as the app would call it on send. */
+const send = (ctx, text) => {
+  const mw = ctx.contributions.find(c => c.area === 'composer.middleware')
+  return mw.data.handler({ text, attachments: [] })
+}
+
+test('middleware: every draft passes through untouched, and nothing is stored', () => {
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  for (const text of ['hello', 'wtf is this', 'WHAT ARE YOU DOING!!!', '']) {
+    const draft = { text, attachments: [{ id: 'x' }] }
+    const mw = ctx.contributions.find(c => c.area === 'composer.middleware')
+    assert.equal(mw.data.handler(draft), draft, 'same object back')
+    assert.deepEqual(draft, { text, attachments: [{ id: 'x' }] }, 'not modified')
+  }
+  const saved = JSON.stringify(ctx.stored())
+  assert.doesNotMatch(saved, /wtf|WHAT ARE YOU/, 'message text never persisted')
+  const mw = ctx.contributions.find(c => c.area === 'composer.middleware')
+  assert.equal(mw.data.handler(undefined), undefined, 'odd drafts never throw')
+  assert.equal(mw.data.handler({}).text, undefined)
+  ctx.dispose()
+})
+
+test('breather: one tense message does nothing; two + Hermes working → box breathing offer', () => {
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { $routine, $ui } = modelOf(ctx)
+  send(ctx, 'wtf')
+  busy({ a: true })
+  ctx.advance(10_000)
+  assert.equal(ctx.pane(), undefined, 'one-off ignored (and no tool → no stretch)')
+  busy({})
+  ctx.advance(60_000)
+
+  send(ctx, 'what are you doing??')
+  busy({ a: true })
+  ctx.advance(2_000)
+  assert.equal(ctx.pane(), undefined, 'waits ~3 s')
+  ctx.advance(1_500)
+  assert.ok(ctx.pane(), 'offered')
+  assert.equal($ui.get().offered, true)
+  assert.equal($routine.get().exId, 'box-breathing')
+  assert.equal($routine.get().phase, 'offer')
+
+  ctx.emit('tool.start', { session_id: 'a' })
+  ctx.advance(15_000)
+  assert.equal($routine.get().exId, 'box-breathing', 'the spell’s stretch offer is replaced')
+  ctx.dispose()
+})
+
+test('breather: keeps running after Hermes finishes; done starts its own cooldown only', () => {
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { $routine } = modelOf(ctx)
+  send(ctx, 'ffs')
+  send(ctx, 'I told you already')
+  busy({ a: true })
+  ctx.advance(3_500 + 5_000) // offer + countdown
+  assert.equal($routine.get().phase, 'step')
+  busy({})
+  ctx.advance(10_000)
+  assert.equal($routine.get().phase, 'step', 'still breathing')
+  ctx.advance(55_000) // 64 s of breathing in all
+  assert.equal($routine.get().phase, 'done')
+  assert.ok(ctx.stored().lastBreatherAt, 'breather cooldown started')
+  assert.equal(ctx.stored().lastBreakAt, undefined, 'stretch cooldown untouched')
+  ctx.advance(DONE_LINGER_MS + EXIT_MS + 500)
+  assert.equal(ctx.pane(), undefined, 'lingers, then leaves')
+  assert.equal($routine.get().phase, 'idle', 'and resets for next time')
+
+  // Within the breather cooldown: another rough patch → no breather, but a
+  // long tool task still gets a stretch.
+  send(ctx, 'wtf')
+  send(ctx, 'are you serious')
+  busy({ a: true })
+  ctx.advance(1_000)
+  ctx.emit('tool.start', { session_id: 'a' })
+  ctx.advance(9_500)
+  assert.equal($routine.get().exId, 'neck-side-tilt')
+  assert.equal($routine.get().phase, 'offer')
+  ctx.dispose()
+})
+
+test('breather: cooldown expires; Hermes finishing first withdraws it quietly; disabled → nothing', () => {
+  const ctx = fakeCtx({ lastBreatherAt: Date.now() - (BREATHER_COOLDOWN_MIN * 60_000 + 1) })
+  plugin.register(ctx)
+  const { $routine, actions } = modelOf(ctx)
+  send(ctx, 'wtf')
+  send(ctx, 'ffs')
+  busy({ a: true })
+  ctx.advance(3_500)
+  assert.equal($routine.get().exId, 'box-breathing', 'cooldown over → offered')
+  busy({})
+  ctx.advance(EXIT_MS + 100)
+  assert.equal(ctx.pane(), undefined, 'withdrawn')
+  assert.equal($routine.get().phase, 'idle')
+  assert.equal($routine.get().exId, 'neck-side-tilt', 'back to the default')
+  assert.ok(Date.now() - ctx.stored().lastBreatherAt > BREATHER_COOLDOWN_MIN * 60_000, 'no new cooldown')
+
+  actions.updateSettings({ breathersEnabled: false })
+  send(ctx, 'wtf')
+  send(ctx, 'ffs')
+  busy({ a: true })
+  ctx.advance(5_000)
+  assert.equal(ctx.pane(), undefined, 'detection off')
+  ctx.dispose()
+})
+
+test('breather: an uptick with no work following expires after 2 minutes', () => {
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { $tension } = modelOf(ctx)
+  send(ctx, 'wtf')
+  send(ctx, 'ffs')
+  assert.ok($tension.get().armedAt)
+  ctx.advance(2 * 60_000 + 500)
+  assert.equal($tension.get().armedAt, null)
+  busy({ a: true })
+  ctx.advance(5_000)
+  assert.equal(ctx.pane(), undefined)
+  ctx.dispose()
+})
+
+test('render: box breathing renders through every phase; ⌘K starts it', () => {
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { $routine } = modelOf(ctx)
+  const run = id => ctx.contributions.find(c => c.data && c.data.id === `stretch-break.${id}`).data.run()
+  run('breathe')
+  assert.equal($routine.get().exId, BOX_BREATHING.id)
+  assert.equal($routine.get().phase, 'prep')
+  while ($routine.get().phase !== 'done') {
+    renderTree(ctx.pane().render())
+    ctx.advance(2_000)
+  }
+  renderTree(ctx.pane().render())
+  run('preview-breather')
+  renderTree(ctx.pane().render())
+  ctx.dispose()
+})
+
+/** Expand function components into plain elements (stub hooks), for text checks. */
+function expand(node) {
+  if (Array.isArray(node)) return node.map(expand)
+  if (!node || typeof node !== 'object') return node
+  if (typeof node.type === 'function') return expand(node.type(node.props || {}))
+  return { ...node, props: { ...node.props, children: expand(node.props && node.props.children) } }
+}
+function texts(node, out = []) {
+  if (Array.isArray(node)) node.forEach(n => texts(n, out))
+  else if (typeof node === 'string' || typeof node === 'number') out.push(String(node))
+  else if (node && node.props) texts(node.props.children, out)
+  return out
+}
+
+test('card: draws the step that is actually running, even before the driver ticks', () => {
+  const ctx = fakeCtx()
+  plugin.register(ctx)
+  const { $routine, actions } = modelOf(ctx)
+  actions.startExercise(BOX_BREATHING)
+  ctx.advance(3_000 + 4_000 - 100) // 0.1 s left of "breathe in"
+  assert.equal($routine.get().step, 0)
+  // Step boundary passes; the store still holds the finished step.
+  clock.t += 150
+  assert.equal($routine.get().step, 0, 'driver has not caught up yet')
+  const shown = texts(expand(ctx.pane().render()))
+  assert.ok(shown.includes('hold'), 'already on the next step')
+  assert.ok(shown.includes('4'), 'counting from 4')
+  assert.ok(!shown.includes('0'), 'never a 0')
+  ctx.dispose()
+})
+

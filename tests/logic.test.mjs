@@ -5,7 +5,18 @@ import { readFileSync } from 'node:fs'
 
 import plugin, {
   DEFAULT_SETTINGS,
-  EXERCISE,
+  BOX_BREATHING,
+  TENSION_WINDOW_MS,
+  ownWords,
+  tensionScore,
+  tensionSignals,
+  tensionTotal,
+  tensionUptick,
+  NECK_TILT,
+  currentRound,
+  displaySeconds,
+  exerciseOf,
+  routineSeconds,
   OFFER_MS,
   PREP_MS,
   REST_MS,
@@ -131,36 +142,39 @@ test('shouldOffer: needs a tool, the delay, offers on, idle routine, no cooldown
 
 // ── routine ─────────────────────────────────────────────────────────────────
 
-const HOLD = EXERCISE.holdMs
-const phases = s => `${s.phase}:${s.rep}`
+const EXERCISE = NECK_TILT
+const HOLD = EXERCISE.steps[0].ms
+const phases = s => `${s.phase}:${s.step}`
 
-test('routine: full run prep → hold → rest → hold → done', () => {
+test('routine: neck tilt runs prep → left hold → rest → right hold → done', () => {
   let s = startRoutine(EXERCISE, 0)
   assert.equal(phases(s), 'prep:0')
-  assert.equal(EXERCISE.reps.length, 2)
+  assert.equal(s.exId, 'neck-side-tilt')
+  assert.deepEqual(EXERCISE.steps.map(st => st.ms), [20_000, REST_MS, 20_000], 'timings unchanged from b11')
   s = tickRoutine(s, EXERCISE, PREP_MS - 1)
   assert.equal(phases(s), 'prep:0', 'not yet')
   s = tickRoutine(s, EXERCISE, PREP_MS)
-  assert.equal(phases(s), 'hold:0')
+  assert.equal(phases(s), 'step:0')
   assert.equal(s.endsAt, PREP_MS + HOLD, 'chained from the previous end, not from tick time')
   s = tickRoutine(s, EXERCISE, PREP_MS + HOLD + 1)
-  assert.equal(phases(s), 'rest:0')
+  assert.equal(phases(s), 'step:1')
   s = tickRoutine(s, EXERCISE, PREP_MS + HOLD + REST_MS)
-  assert.equal(phases(s), 'hold:1')
+  assert.equal(phases(s), 'step:2')
   s = tickRoutine(s, EXERCISE, PREP_MS + 2 * HOLD + REST_MS)
-  assert.equal(phases(s), 'done:1')
+  assert.equal(phases(s), 'done:2')
+  assert.equal(s.exId, 'neck-side-tilt', 'done remembers the exercise (for "Again")')
   assert.equal(isRoutineActive(s), false)
   assert.equal(tickRoutine(s, EXERCISE, 1e12), s, 'done is terminal')
 })
 
 test('routine: the offer countdown leads straight into the first hold', () => {
-  let s = offerRoutine(0)
+  let s = offerRoutine(EXERCISE, 0)
   assert.equal(s.phase, 'offer')
   assert.equal(isTimed(s), true)
   assert.equal(isRoutineActive(s), false, 'an offer is not a commitment')
   s = tickRoutine(s, EXERCISE, OFFER_MS)
-  assert.equal(phases(s), 'hold:0')
-  assert.equal(phases(skipRoutine(offerRoutine(0), EXERCISE, 1)), 'hold:0', 'start now')
+  assert.equal(phases(s), 'step:0')
+  assert.equal(phases(skipRoutine(offerRoutine(EXERCISE, 0), EXERCISE, 1)), 'step:0', 'start now')
 })
 
 test('routine: a big gap (sleep, missed ticks) catches up in one tick', () => {
@@ -175,7 +189,7 @@ test('routine: tick returns the same object when nothing changes', () => {
 })
 
 test('routine: pause freezes time, resume shifts the deadline', () => {
-  let s = tickRoutine(startRoutine(EXERCISE, 0), EXERCISE, PREP_MS) // hold:0, ends PREP+HOLD
+  let s = tickRoutine(startRoutine(EXERCISE, 0), EXERCISE, PREP_MS) // step:0, ends PREP+HOLD
   s = pauseRoutine(s, PREP_MS + 5_000)
   assert.equal(remainingMs(s, PREP_MS + 5_000), HOLD - 5_000)
   assert.equal(remainingMs(s, PREP_MS + 60_000), HOLD - 5_000, 'frozen while paused')
@@ -190,10 +204,10 @@ test('routine: pause freezes time, resume shifts the deadline', () => {
 test('routine: skip advances one phase from now, and clears a pause', () => {
   let s = startRoutine(EXERCISE, 0)
   s = skipRoutine(s, EXERCISE, 1_000)
-  assert.equal(phases(s), 'hold:0')
+  assert.equal(phases(s), 'step:0')
   assert.equal(s.endsAt, 1_000 + HOLD)
   s = skipRoutine(pauseRoutine(s, 2_000), EXERCISE, 3_000)
-  assert.equal(phases(s), 'rest:0')
+  assert.equal(phases(s), 'step:1')
   assert.equal(s.pausedAt, null)
   s = skipRoutine(skipRoutine(s, EXERCISE, 4_000), EXERCISE, 5_000)
   assert.equal(s.phase, 'done')
@@ -219,16 +233,15 @@ test('no native title= on buttons (Hermes DESIGN.md; core has the same test)', (
 })
 
 test('layout: large while stretching, compact otherwise', () => {
-  for (const p of ['prep', 'hold', 'rest']) assert.equal(isLargePhase(p), true, p)
+  for (const p of ['prep', 'step']) assert.equal(isLargePhase(p), true, p)
   for (const p of ['idle', 'offer', 'done']) assert.equal(isLargePhase(p), false, p)
 })
 
 test('routine bar: a segment per hold, a rest between, filled in order', () => {
-  const HOLD = EXERCISE.holdMs
   const fills = s => routineSegments(s, EXERCISE, at).map(x => Math.round(x.fill * 100) / 100)
   let at = 0
   let s = startRoutine(EXERCISE, 0)
-  assert.deepEqual(routineSegments(s, EXERCISE, 0).map(x => x.kind), ['hold', 'rest', 'hold'])
+  assert.deepEqual(routineSegments(s, EXERCISE, 0).map(x => x.round), [0, null, 1])
   assert.deepEqual(fills(s), [0, 0, 0], 'getting ready: empty')
   at = PREP_MS + HOLD / 2
   s = tickRoutine(s, EXERCISE, at)
@@ -246,11 +259,124 @@ test('routine bar: a segment per hold, a rest between, filled in order', () => {
 })
 
 test('figure: shows what you should be doing now', () => {
-  const HOLD = EXERCISE.holdMs
   const pose = at => currentPose(tickRoutine(startRoutine(EXERCISE, 0), EXERCISE, at), EXERCISE)
   assert.equal(pose(0), 'centre', 'getting ready: upright')
   assert.equal(pose(PREP_MS + 1), 'left')
   assert.equal(pose(PREP_MS + HOLD + 1), 'centre', 'between sides: upright')
   assert.equal(pose(PREP_MS + HOLD + REST_MS + 1), 'right')
+})
+
+test('round: the one you are in, or heading into during a rest / get ready', () => {
+  const round = at => currentRound(tickRoutine(startRoutine(EXERCISE, 0), EXERCISE, at), EXERCISE)
+  assert.equal(round(0), 0)
+  assert.equal(round(PREP_MS + 1), 0)
+  assert.equal(round(PREP_MS + HOLD + 1), 1, 'rest: heading into the right side')
+  assert.equal(EXERCISE.roundText(1), 'Rep 2 of 2 · Right side')
+  assert.equal(routineSeconds(EXERCISE), 45)
+})
+
+test('box breathing: 4 rounds of in / hold / out / hold, 4 s each', () => {
+  const ex = BOX_BREATHING
+  assert.equal(ex.steps.length, 16)
+  assert.ok(ex.steps.every(st => st.ms === 4_000))
+  assert.deepEqual(ex.steps.slice(0, 4).map(st => st.label), ['breathe in', 'hold', 'breathe out', 'hold'])
+  let s = startRoutine(ex, 0)
+  assert.equal(currentPose(s, ex), 'ready')
+  s = tickRoutine(s, ex, PREP_MS + 4_000 * 5 + 1) // round 2, second step
+  assert.equal(phases(s), 'step:5')
+  assert.equal(currentPose(s, ex), 'hold')
+  assert.equal(currentRound(s, ex), 1)
+  assert.equal(ex.roundText(1), 'Round 2 of 4')
+  assert.equal(Math.ceil(remainingMs(s, PREP_MS + 4_000 * 5 + 1) / 1000), 4, 'counts each step down 4, 3, 2, 1')
+  const segs = routineSegments(s, ex, PREP_MS + 4_000 * 5 + 1)
+  assert.deepEqual(segs.map(x => x.round), [0, 1, 2, 3], 'one bar segment per round')
+  assert.equal(segs[0].fill, 1)
+  assert.ok(segs[1].fill > 0.25 && segs[1].fill < 0.26)
+  s = tickRoutine(s, ex, 1e9)
+  assert.equal(s.phase, 'done')
+  assert.equal(exerciseOf(s), ex)
+  assert.equal(exerciseOf({ exId: 'nope' }), NECK_TILT, 'unknown ids fall back to the stretch')
+})
+
+// ── tension detection ───────────────────────────────────────────────────────
+
+test('tension: frustrated messages score', () => {
+  for (const msg of [
+    'the fuck are you doing',
+    'wtf why did it delete the tests',
+    'ffs',
+    'what are you doing??',
+    'I told you not to touch that file',
+    'for the third time, use pnpm',
+    'it still doesn’t work',
+    "it still doesn't work",
+    'WHY DID YOU DELETE THE CONFIG',
+    'no!!!',
+    'are you serious',
+    'this is bullshit'
+  ]) {
+    assert.equal(tensionScore(msg), 1, msg)
+  }
+})
+
+test('tension: calm messages, pasted code and logs do not', () => {
+  for (const msg of [
+    'can you add a test for the parser?',
+    'kill the process on port 3000',
+    'add shiitake and shitake to the recipe list',
+    'update the README API URL section',
+    'fix it please',
+    'stop the dev server',
+    'remove the useless imports',
+    'here is the error:\n```\nError: what the hell happened\n  at fuck (x.js:1)\n```',
+    'the log says `wtf: fatal`',
+    '> what are you doing\nthat was the old message, ignore it',
+    'look at /Users/me/shit/notes.txt',
+    'see https://example.com/fuck-it',
+    'traceback:\n    raise WTFError("ffs")',
+    'Thanks! That worked.'
+  ]) {
+    assert.equal(tensionScore(msg), 0, msg)
+  }
+})
+
+test('tension: a message counts once however many signals it has', () => {
+  const sig = tensionSignals('WHAT THE FUCK ARE YOU DOING!!!')
+  assert.deepEqual(sig, { swear: true, phrase: true, shouting: true, punctuation: true })
+  assert.equal(tensionScore('WHAT THE FUCK ARE YOU DOING!!!'), 1)
+  assert.equal(tensionScore(''), 0)
+  assert.equal(tensionScore(undefined), 0)
+  assert.match(ownWords('see `rm -rf` and src/app.ts'), /^see\s+and\s+$/)
+})
+
+test('tension: an uptick is 2 tense messages within 10 minutes', () => {
+  const now = 100 * 60_000
+  assert.equal(tensionUptick([{ at: now, score: 1 }], now), false, 'one-offs are ignored')
+  assert.equal(tensionUptick([{ at: now - 60_000, score: 1 }, { at: now, score: 1 }], now), true)
+  const old = { at: now - TENSION_WINDOW_MS, score: 1 }
+  assert.equal(tensionUptick([old, { at: now, score: 1 }], now), false, 'outside the window')
+  assert.equal(tensionTotal([old, { at: now - 1, score: 1 }], now), 1)
+})
+
+test('offers: a finished exercise still on screen does not block the next offer', () => {
+  const base = {
+    spell: { startedAt: 0, toolSeen: true, offered: false },
+    settings: DEFAULT_SETTINGS,
+    lastBreakAt: null,
+    now: 60_000
+  }
+  assert.equal(shouldOffer({ ...base, routinePhase: 'done' }), true)
+  assert.equal(shouldOffer({ ...base, routinePhase: 'step' }), false)
+  assert.equal(shouldOffer({ ...base, routinePhase: 'offer' }), false)
+})
+
+test('countdown: shows N … 1 and never 0', () => {
+  const ex = BOX_BREATHING
+  const s = tickRoutine(startRoutine(ex, 0), ex, PREP_MS) // first 4 s step
+  const shown = [0, 999, 1_000, 2_500, 3_000, 3_999, 4_000].map(t => displaySeconds(s, PREP_MS + t))
+  assert.deepEqual(shown, [4, 4, 3, 2, 1, 1, 1], 'clamped at 1 even past the end')
+  const next = tickRoutine(s, ex, PREP_MS + 4_000)
+  assert.equal(next.step, 1)
+  assert.equal(displaySeconds(next, PREP_MS + 4_000), 4, 'the next step starts at 4')
 })
 

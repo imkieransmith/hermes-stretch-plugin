@@ -46,7 +46,8 @@ export const COMPOSER_AREAS = {
   bottom: 'composer.bottom',
   underside: 'composer.underside',
   leading: 'composer.leading',
-  actions: 'composer.actions'
+  actions: 'composer.actions',
+  middleware: 'composer.middleware'
 }
 export const Button = () => null
 export const Tip = ({ children }) => children

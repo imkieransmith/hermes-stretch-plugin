@@ -31,19 +31,37 @@ Nov 11 2026, 5 PM EST).
     offer is withdrawn quietly, with no cooldown. With auto-start off, it
     shows a **Start** button instead.
   - **Stretch:** 20 s hold (left) → 4 s "switch" → 20 s hold (right) →
-    "Nice one ✓". It has a countdown ring, rep dots, **Pause/Resume**,
+    a "Well done, you did it" screen with a tick, which leaves by itself
+    after 5 s (or straight away with **Close**). In dev mode
+    (`DEV.keepPaneOpen`) it returns to the offer card instead, alternating
+    between the exercises. It has a countdown ring, rep dots, **Pause/Resume**,
     **skip** and **stop**. A stretch underway keeps the pane up after Hermes
     finishes. `stop`, `not now` and `hide` close it straight away.
   - **debug** view: focused session id, `awaitingResponse`, busy sessions,
     gateway socket; turn transitions (`▶ start` / `■ finish after 0:42`) for
     **this chat** or **all chats**; live gateway event counts/recent events.
+- **Breathers:** if your messages get tense (2 frustrated messages within
+  10 minutes: swearing, "what are you doing", "I told you", shouting in
+  capitals, "!!!"), the same card offers **box breathing** about 3 s after
+  Hermes starts working: 4 rounds of breathe in / hold / breathe out / hold,
+  4 s each. It has its own 30-minute cooldown, separate from stretches.
+  - **Privacy:** messages are checked on your device as you send them, and
+    the text is never stored, sent anywhere or changed. Only a timestamp and
+    a score are kept, in memory, for 10 minutes. The code that does this is
+    the `tension` composer middleware in `register()` and `tensionScore()` in
+    `desktop/plugin.js`.
+  - Code blocks, inline code, quoted lines, indented (pasted) lines, links
+    and file paths are ignored, so swearing in a pasted log doesn't count.
+  - Only messages sent from Desktop's input box are checked.
 - **Settings ▸ Plugins ▸ Stretch Break**:
   - Offer stretch breaks (on/off)
   - Offer after (10/20/30/60 s)
   - Start automatically (on/off)
+  - Offer a breather when things get tense (on/off, default on)
   - Time between breaks (none/10/20/30/45 min)
-- **⌘K**: "Stretch Break: Toggle panel", "Pause / resume stretch offers",
-  "Open settings", "Show debug panel", "Clear activity log".
+- **⌘K**: "Stretch Break: Toggle panel", "Start a stretch", "Start box
+  breathing", "Pause / resume stretch offers", "Open settings", "Show debug
+  panel", "Clear activity log" (plus prototype previews of each offer).
 - **Dev:** `DEV.keepPaneOpen` in `desktop/plugin.js` keeps the pane always
   open while developing. It's currently **on**; turn it off before release.
 

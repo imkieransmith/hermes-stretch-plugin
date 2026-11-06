@@ -8,10 +8,16 @@
  *     appears below the input box (COMPOSER_AREAS.underside) offering a short
  *     guided stretch (auto-start countdown or Start button), subject to a
  *     cooldown. A stretch underway stays up after Hermes finishes.
+ *   - When your messages get tense (2 frustrated messages within 10 min), the
+ *     same card offers box breathing instead, with its own cooldown.
+ *     Detection is a pass-through composer middleware + tensionScore(): the
+ *     text is checked on this device and never stored, sent or changed.
+ *   - Exercises are data (NECK_TILT, BOX_BREATHING): timed steps run by one
+ *     routine engine and drawn by one card.
  *     (The older bottom pane is still selectable while we decide; see
  *     docs/notes/bottom-pane-and-placements.md.)
  *   - Settings ▸ Plugins ▸ Stretch Break: offers on/off, delay, auto-start,
- *     cooldown (ctx.storage).
+ *     breathers on/off, cooldown (ctx.storage).
  *   - A debug view (turn transitions, gateway events) for development.
  *
  * Rules (see AGENTS.md):
@@ -54,6 +60,8 @@ const PANE_HEIGHT = '50vh'
 /** Grace period after work ends: shows "Hermes finished" briefly (and avoids a
  *  flash between back-to-back turns) before the pane leaves. */
 export const HIDE_DELAY_MS = 2500
+/** How long the "well done" screen stays before the card leaves by itself. */
+export const DONE_LINGER_MS = 5000
 
 /**
  * PROTOTYPE — where the stretch UI lives (Settings / ⌘K toggle while we pick one):
@@ -77,7 +85,7 @@ export const PLACEMENTS = [
  */
 export const DEV = { keepPaneOpen: true }
 /** DEV ONLY — bump on each change so a stale hot reload is obvious in the UI. */
-const DEV_BUILD = 'b11'
+const DEV_BUILD = 'b15'
 /** Exit animation length; the pane is unregistered when it completes. */
 export const EXIT_MS = 220
 const ENTER_MS = 280
@@ -175,6 +183,8 @@ export const DEFAULT_SETTINGS = {
   autoStart: true,
   /** No automatic offer within this long of the last break (0 = every task). */
   cooldownMin: 20,
+  /** Offer box breathing when your messages get tense (checked on this device). */
+  breathersEnabled: true,
   /** PROTOTYPE: which surface shows the stretch (see PLACEMENTS). */
   placement: 'below'
 }
@@ -185,13 +195,18 @@ export const COOLDOWN_CHOICES = [0, 10, 20, 30, 45]
 export function normalizeSettings(raw) {
   const s = { ...DEFAULT_SETTINGS }
   if (!raw || typeof raw !== 'object') return s
-  for (const key of ['offersEnabled', 'autoStart']) if (typeof raw[key] === 'boolean') s[key] = raw[key]
+  for (const key of ['offersEnabled', 'autoStart', 'breathersEnabled']) if (typeof raw[key] === 'boolean') s[key] = raw[key]
   for (const key of ['offerDelaySec', 'cooldownMin']) {
     const n = raw[key]
     if (typeof n === 'number' && Number.isFinite(n) && n >= 0) s[key] = n
   }
   if (PLACEMENTS.some(([id]) => id === raw.placement)) s.placement = raw.placement
   return s
+}
+
+/** Nothing underway or on offer: a finished exercise still on screen counts as free. */
+export function canOfferOver(routinePhase) {
+  return routinePhase === 'idle' || routinePhase === 'done'
 }
 
 export function inCooldown(lastBreakAt, cooldownMin, now) {
@@ -209,8 +224,127 @@ export function shouldOffer({ spell, settings, lastBreakAt, routinePhase, now })
       spell.toolSeen &&
       now - spell.startedAt >= settings.offerDelaySec * 1000 &&
       settings.offersEnabled &&
-      routinePhase === 'idle' &&
+      canOfferOver(routinePhase) &&
       !inCooldown(lastBreakAt, settings.cooldownMin, now)
+  )
+}
+
+// ── Tension detection (pure, local) ──────────────────────────────────────────
+// Each message you send from Desktop is checked here, on this device, by the
+// composer middleware in register(). The text is never stored, sent anywhere
+// or changed; only { at, score } is kept, in memory, for TENSION_WINDOW_MS.
+
+/** How much each signal adds to a message's score. Tune here. */
+export const TENSION_WEIGHTS = { swear: 1, phrase: 1, shouting: 1, punctuation: 1 }
+/** A single message never counts for more than this (so one outburst alone
+ *  doesn't trigger; v1 = "any signal makes a message count, once"). */
+export const TENSION_MESSAGE_MAX = 1
+/** Offer a breather when the scores in the window add up to this. */
+export const TENSION_THRESHOLD = 2
+export const TENSION_WINDOW_MS = 10 * 60_000
+
+const SWEAR_RE =
+  /\b(?:f+u+c+k+\w*|fck\w*|fuk\w*|motherf\w*|shit(?:s|ty|te|show|ting)?|bullshit|wtf+|ffs|omfg|goddamn\w*|damn\s*it|dammit|bloody\s+hell|pissed\s+off|crap(?:py)?)\b/i
+const PHRASE_RE = new RegExp(
+  [
+    'what (?:the (?:hell|heck)\\b|is wrong with you)',
+    '(?:what )?(?:the (?:fuck|hell|heck) )?(?:are you doing|have you done|did you (?:just )?do)',
+    'why (?:would|did|do) you (?:keep|always|do that|do this|delete|break|change|ignore)',
+    'i (?:already |just )?(?:told|asked) you',
+    'i (?:already|just) said',
+    'you keep',
+    'stop (?:doing that|doing this|it|that)\\b',
+    'for the (?:last|third|fourth|fifth|hundredth|nth|\\d+(?:st|nd|rd|th)) time',
+    'are you (?:serious|kidding|joking|kidding me)',
+    "(?:still|again) (?:broken|not working|doesn'?t work|wrong|failing)",
+    "(?:it|this|that) (?:still )?(?:doesn'?t|does not|isn'?t|is not) work(?:ing)?",
+    "you(?:'re| are) (?:useless|stupid|an idiot|hopeless)",
+    'this is (?:ridiculous|insane|useless|hopeless|a mess|painful)',
+    'come on\\W*$',
+    'seriously\\s*[?!]'
+  ].join('|'),
+  'im'
+)
+const PUNCTUATION_RE = /!{3,}|\?{3,}|[?!]*(?:\?!|!\?)[?!]*/
+
+/**
+ * Drop what the user didn't write in their own voice: fenced and inline code,
+ * quoted lines, indented lines (pasted code / logs), URLs and file paths.
+ */
+export function ownWords(text) {
+  return String(text || '')
+    .replace(/[\u2018\u2019]/g, "'") // curly apostrophes (macOS smart quotes)
+    .replace(/```[\s\S]*?(?:```|$)/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/^(?: {2,}|\t|\s*>).*$/gm, ' ')
+    .replace(/\b\w+:\/\/\S+/g, ' ')
+    .replace(/\S*\/\S+/g, ' ') // paths (anything with a slash)
+    .replace(/\b[\w.-]+\.(?:js|mjs|ts|tsx|jsx|py|rb|go|rs|java|json|ya?ml|md|txt|log|sh|css|html)\b/gi, ' ')
+}
+
+/** Mostly capitals over several words ("WHY DID YOU DELETE IT"), not acronyms ("README API URL"). */
+function isShouting(words) {
+  const long = words.filter(w => /[A-Za-z]{3,}/.test(w))
+  const caps = long.filter(w => w === w.toUpperCase() && /[A-Z]/.test(w))
+  return caps.length >= 4 && caps.length / long.length >= 0.6
+}
+
+/** Which signals a message shows. */
+export function tensionSignals(text) {
+  const t = ownWords(text)
+  const words = t.split(/[^A-Za-z']+/).filter(Boolean)
+  return {
+    swear: SWEAR_RE.test(t),
+    phrase: PHRASE_RE.test(t),
+    shouting: isShouting(words),
+    punctuation: PUNCTUATION_RE.test(t)
+  }
+}
+
+/** Weighted score for one message, capped at TENSION_MESSAGE_MAX. 0 = calm. */
+export function tensionScore(text) {
+  const sig = tensionSignals(text)
+  const sum = Object.keys(TENSION_WEIGHTS).reduce((acc, k) => acc + (sig[k] ? TENSION_WEIGHTS[k] : 0), 0)
+  return Math.min(sum, TENSION_MESSAGE_MAX)
+}
+
+/** Keep only entries ({ at, score }) inside the window. */
+export function recentTension(entries, now) {
+  return entries.filter(e => now - e.at < TENSION_WINDOW_MS)
+}
+
+/** Total score in the window. */
+export function tensionTotal(entries, now) {
+  return recentTension(entries, now).reduce((sum, e) => sum + e.score, 0)
+}
+
+/** Has frustration risen enough to offer a breather? */
+export function tensionUptick(entries, now) {
+  return tensionTotal(entries, now) >= TENSION_THRESHOLD
+}
+
+/** A breather is offered this long into Hermes working (no tool needed). */
+export const BREATHER_DELAY_MS = 3_000
+/** Breathing has its own cooldown, separate from stretching. */
+export const BREATHER_COOLDOWN_MIN = 30
+/** An uptick arms a breather for this long, waiting for Hermes to start. */
+export const BREATHER_ARM_MS = 2 * 60_000
+
+/**
+ * Offer a breather for this busy spell? `armedAt` = when tension last crossed
+ * the threshold (null = not armed). The delay counts from whichever came
+ * later, the spell or the arming (a tense message can land mid-spell).
+ */
+export function shouldOfferBreather({ spell, armedAt, settings, lastBreatherAt, routinePhase, now }) {
+  return Boolean(
+    spell &&
+      !spell.offered &&
+      armedAt != null &&
+      now - armedAt < BREATHER_ARM_MS &&
+      now - Math.max(spell.startedAt, armedAt) >= BREATHER_DELAY_MS &&
+      settings.breathersEnabled &&
+      canOfferOver(routinePhase) &&
+      !inCooldown(lastBreatherAt, BREATHER_COOLDOWN_MIN, now)
   )
 }
 
@@ -219,49 +353,94 @@ export function filterLog(log, scope, focusedId) {
   return scope === 'all' ? log : log.filter(e => e.sessionId === focusedId)
 }
 
-// ── Exercise + routine (pure, timestamp-driven) ───────────────────────────────────────
+// ── Exercises + routine (pure, timestamp-driven) ─────────────────────────────
 
-/** Stage 2 ships a single gentle exercise: one rep per side. */
-export const EXERCISE = {
-  id: 'neck-side-tilt',
-  name: 'Neck side tilt',
-  summary: 'Eases tension along the sides of your neck.',
-  holdMs: 20_000,
-  /** Shown while getting ready. */
-  setup: 'Sit tall, shoulders relaxed and down.',
-  reps: [
-    { side: 'Left', cue: 'Let your head tilt toward your left shoulder. Don’t pull it.' },
-    { side: 'Right', cue: 'Let your head tilt toward your right shoulder. Don’t pull it.' }
-  ]
-}
-
-/** "Get ready" before the first rep, and the pause between reps. */
+/** "Get ready" before the first step, and the stretch's pause between sides. */
 export const PREP_MS = 3_000
 export const REST_MS = 4_000
 /** Auto-start countdown ("Starting in 5…"); it replaces the get-ready phase. */
 export const OFFER_MS = 5_000
 
 /**
- * Routine state. Phases: idle → prep → hold → (rest → hold)* → done,
- * or, auto-started: offer → hold → … (the countdown is the get-ready).
- * `endsAt` is the wall-clock end of the current phase; while paused,
- * `pausedAt` freezes time and resuming shifts `endsAt` by the pause length.
+ * An exercise is a list of timed steps run after a short get-ready.
+ *   step: { ms, label, cue, pose, round }
+ *     label  caption beside the big countdown ("seconds left", "breathe in")
+ *     cue    the instruction under the bar
+ *     pose   what the figure shows during the step
+ *     round  index into `rounds` (bar segment + "Rep 1 of 2"); null = an
+ *            in-between step (a rest) with its own unlabelled bar segment
+ *   rounds: bar labels, one per round (null = no label row)
  */
-export function idleRoutine() {
-  return { phase: 'idle', rep: 0, endsAt: null, pausedAt: null }
+export const NECK_TILT = {
+  id: 'neck-side-tilt',
+  kind: 'stretch',
+  name: 'Neck side tilt',
+  summary: 'Eases tension along the sides of your neck.',
+  detail: '2 × 20 s',
+  offerHeading: 'Quick stretch while Hermes works?',
+  doneText: 'You finished the neck side tilt. Roll your shoulders and carry on.',
+  setup: 'Sit tall, shoulders relaxed and down. First: left side.',
+  prepPose: 'centre',
+  rounds: ['Left', 'Right'],
+  roundText: i => `Rep ${i + 1} of 2 · ${['Left', 'Right'][i]} side`,
+  steps: [
+    { ms: 20_000, label: 'seconds left', pose: 'left', round: 0, cue: 'Let your head tilt toward your left shoulder. Don’t pull it.' },
+    { ms: REST_MS, label: 'switch sides', pose: 'centre', round: null, cue: 'Slowly bring your head back to centre. Next: right side.' },
+    { ms: 20_000, label: 'seconds left', pose: 'right', round: 1, cue: 'Let your head tilt toward your right shoulder. Don’t pull it.' }
+  ]
+}
+
+const BOX_ROUNDS = 4
+const BOX_SIDE_MS = 4_000
+export const BOX_BREATHING = {
+  id: 'box-breathing',
+  kind: 'breathing',
+  name: 'Box breathing',
+  summary: 'Slow, even breaths to settle your nervous system.',
+  detail: `${BOX_ROUNDS} rounds of 4-4-4-4`,
+  offerHeading: 'Take a breather while Hermes works?',
+  doneText: 'Four slow rounds of box breathing. Nice and steady.',
+  setup: 'Sit comfortably and let your shoulders drop. Breathe out fully.',
+  prepPose: 'ready',
+  rounds: Array.from({ length: BOX_ROUNDS }, () => null),
+  roundText: i => `Round ${i + 1} of ${BOX_ROUNDS}`,
+  steps: Array.from({ length: BOX_ROUNDS }, (_, round) => [
+    { ms: BOX_SIDE_MS, label: 'breathe in', pose: 'in', round, cue: 'Breathe in slowly through your nose.' },
+    { ms: BOX_SIDE_MS, label: 'hold', pose: 'hold', round, cue: 'Hold gently, without straining.' },
+    { ms: BOX_SIDE_MS, label: 'breathe out', pose: 'out', round, cue: 'Breathe out slowly through your mouth.' },
+    { ms: BOX_SIDE_MS, label: 'hold', pose: 'hold', round, cue: 'Rest, empty, for a moment.' }
+  ]).flat()
+}
+
+export const EXERCISES = { [NECK_TILT.id]: NECK_TILT, [BOX_BREATHING.id]: BOX_BREATHING }
+
+/** The exercise a routine state is for (unknown ids fall back to the stretch). */
+export function exerciseOf(s) {
+  return EXERCISES[s && s.exId] || NECK_TILT
+}
+
+/**
+ * Routine state. Phases: idle → prep → step(0…n-1) → done, or, auto-started:
+ * offer → step 0 → … (the countdown is the get-ready). `exId` names the
+ * exercise (it's shown while idle too). `endsAt` is the wall-clock end of the
+ * current phase; while paused, `pausedAt` freezes time and resuming shifts
+ * `endsAt` by the pause length.
+ */
+export function idleRoutine(ex = NECK_TILT) {
+  return { exId: ex.id, phase: 'idle', step: 0, endsAt: null, pausedAt: null }
 }
 
 export function startRoutine(ex, now) {
-  return { phase: 'prep', rep: 0, endsAt: now + PREP_MS, pausedAt: null }
+  return { exId: ex.id, phase: 'prep', step: 0, endsAt: now + PREP_MS, pausedAt: null }
 }
 
-export function offerRoutine(now) {
-  return { phase: 'offer', rep: 0, endsAt: now + OFFER_MS, pausedAt: null }
+export function offerRoutine(ex, now) {
+  return { exId: ex.id, phase: 'offer', step: 0, endsAt: now + OFFER_MS, pausedAt: null }
 }
 
-/** A stretch is underway (the user is committed; keep the pane up). */
+/** An exercise is underway (the user is committed; keep the card up). */
 export function isRoutineActive(s) {
-  return s.phase === 'prep' || s.phase === 'hold' || s.phase === 'rest'
+  return s.phase === 'prep' || s.phase === 'step'
 }
 
 /** The current phase has a running clock (includes the offer countdown). */
@@ -269,21 +448,22 @@ export function isTimed(s) {
   return s.phase === 'offer' || isRoutineActive(s)
 }
 
-export function phaseDurationMs(ex, phase) {
-  return { offer: OFFER_MS, prep: PREP_MS, hold: ex.holdMs, rest: REST_MS }[phase] || 0
+export function phaseDurationMs(s, ex) {
+  if (s.phase === 'step') return (ex.steps[s.step] || {}).ms || 0
+  return { offer: OFFER_MS, prep: PREP_MS }[s.phase] || 0
 }
 
 /** Move to the next phase, starting it at `at`. */
 export function advanceRoutine(s, ex, at) {
-  const next = (phase, rep) => ({ phase, rep, endsAt: at + phaseDurationMs(ex, phase), pausedAt: null })
+  const step = i => ({ exId: s.exId, phase: 'step', step: i, endsAt: at + ex.steps[i].ms, pausedAt: null })
   switch (s.phase) {
     case 'offer':
     case 'prep':
-      return next('hold', s.rep)
-    case 'hold':
-      return s.rep < ex.reps.length - 1 ? next('rest', s.rep) : { phase: 'done', rep: s.rep, endsAt: null, pausedAt: null }
-    case 'rest':
-      return next('hold', s.rep + 1)
+      return step(0)
+    case 'step':
+      return s.step < ex.steps.length - 1
+        ? step(s.step + 1)
+        : { exId: s.exId, phase: 'done', step: s.step, endsAt: null, pausedAt: null }
     default:
       return s
   }
@@ -314,10 +494,55 @@ export function remainingMs(s, now) {
   return Math.max(0, s.endsAt - (s.pausedAt ?? now))
 }
 
+/**
+ * The whole seconds to show for a running phase: counts N … 1, never 0.
+ * (At 0 the phase is over and the next one shows its own N.)
+ */
+export function displaySeconds(s, now) {
+  return Math.max(1, Math.ceil(remainingMs(s, now) / 1000))
+}
+
 /** 0 → 1 through the current phase. */
 export function phaseProgress(s, ex, now) {
-  const total = phaseDurationMs(ex, s.phase)
+  const total = phaseDurationMs(s, ex)
   return total ? 1 - remainingMs(s, now) / total : 0
+}
+
+/** Whole routine length (get ready + every step), rounded to 5 s. */
+export function routineSeconds(ex) {
+  const ms = PREP_MS + ex.steps.reduce((sum, st) => sum + st.ms, 0)
+  return Math.round(ms / 5000) * 5
+}
+
+/** The round you're in (or heading into, during a rest or the get-ready). */
+export function currentRound(s, ex) {
+  const from = s.phase === 'step' ? s.step : 0
+  for (let i = from; i < ex.steps.length; i++) if (ex.steps[i].round != null) return ex.steps[i].round
+  return 0
+}
+
+/** What the figure should show right now. */
+export function currentPose(s, ex) {
+  return s.phase === 'step' ? ex.steps[s.step].pose : ex.prepPose
+}
+
+/**
+ * The routine bar: one segment per round (a rest between rounds gets its
+ * own), weighted by duration, each filled 0 → 1.
+ * @returns {{ round: number | null, weight: number, fill: number }[]}
+ */
+export function routineSegments(s, ex, now) {
+  const p = phaseProgress(s, ex, now)
+  const out = []
+  ex.steps.forEach((st, i) => {
+    const fill = s.phase === 'done' || (s.phase === 'step' && i < s.step) ? 1 : s.phase === 'step' && i === s.step ? p : 0
+    const last = out[out.length - 1]
+    if (last && st.round != null && last.round === st.round) {
+      last.filled += fill * st.ms
+      last.weight += st.ms
+    } else out.push({ round: st.round, weight: st.ms, filled: fill * st.ms })
+  })
+  return out.map(({ round, weight, filled }) => ({ round, weight, fill: filled / weight }))
 }
 
 function clock(ts) {
@@ -419,7 +644,8 @@ function Choice({ value, onChange, options }) {
 }
 
 function DebugView({ model }) {
-  const { $activity, $events, $bySession, actions } = model
+  const { $activity, $events, $bySession, $tension, actions } = model
+  const tension = useValue($tension)
   const { focusedId } = useFocusedStatus($activity)
   const [scope, setScope] = useState('chat')
   const awaiting = useValue(host.state.awaitingResponse)
@@ -435,7 +661,9 @@ function DebugView({ model }) {
       jsx(Row, { label: 'this chat', value: shortId(focusedId) }),
       jsx(Row, { label: 'awaiting response', value: String(awaiting) }),
       jsx(Row, { label: 'busy sessions', value: busyIds.length ? busyIds.map(shortId).join(', ') : 'none' }),
-      jsx(Row, { label: 'gateway socket', value: String(gateway) })
+      jsx(Row, { label: 'gateway socket', value: String(gateway) }),
+      jsx(Row, { label: 'tension (10 min)', value: `${tension.total} / ${TENSION_THRESHOLD}` }),
+      jsx(Row, { label: 'breather armed', value: tension.armedAt ? clock(tension.armedAt) : 'no' })
     ]
   })
 
@@ -523,15 +751,9 @@ const FIGURE_NARROW_PX = 104
 const THUMB_PX = 44
 const FADE_MS = 160
 
-/** Whole routine length (get ready + holds + rests), rounded to 5 s. */
-function routineSeconds(ex) {
-  const ms = PREP_MS + ex.holdMs * ex.reps.length + REST_MS * (ex.reps.length - 1)
-  return Math.round(ms / 5000) * 5
-}
-
-/** Large layout for the phases where you're actually stretching. */
+/** Large layout while an exercise is underway. */
 export function isLargePhase(phase) {
-  return phase === 'prep' || phase === 'hold' || phase === 'rest'
+  return phase === 'prep' || phase === 'step'
 }
 
 /** Width of our own element (ResizeObserver; null until measured). */
@@ -545,6 +767,29 @@ function useWidth(ref) {
     return () => ro.disconnect()
   }, [])
   return width
+}
+
+const STEP_ENTER_MS = 280
+
+/**
+ * A new step arriving: our own element fades in when `key` changes (not on
+ * mount). A fade only, no movement. Off with reduced motion.
+ */
+function useEnterOnChange(ref, key) {
+  const first = useRef(true)
+  useEffect(() => {
+    if (first.current) {
+      first.current = false
+      return undefined
+    }
+    const el = ref.current
+    if (!el || typeof el.animate !== 'function' || prefersReducedMotion()) return undefined
+    const anim = el.animate([{ opacity: 0 }, { opacity: 1 }], {
+      duration: STEP_ENTER_MS,
+      easing: EASE_OUT
+    })
+    return () => anim.cancel()
+  }, [key])
 }
 
 /** Soft cross-fade of our own element when `key` changes (not on mount). */
@@ -563,17 +808,9 @@ function useFadeOnChange(ref, key) {
 }
 
 /**
- * What the figure should show right now: tilted to the side being held,
- * upright while getting ready and between sides.
- * @returns {'centre' | 'left' | 'right'}
- */
-export function currentPose(s, ex) {
-  return s.phase === 'hold' ? ex.reps[s.rep].side.toLowerCase() : 'centre'
-}
-
-/**
  * PLACEHOLDER for the exercise illustration (real assets to come). Shows one
- * `pose` ('centre' | 'left' | 'right'). Swap this for the artwork; keep it
+ * `pose` from the exercise's steps (neck tilt: centre / left / right; box
+ * breathing: ready / in / hold / out; any exercise: done). Swap this for the artwork; keep it
  * theme-driven (currentColor / --ui-* vars) for light and dark.
  */
 function Figure({ pose, size }) {
@@ -614,29 +851,12 @@ function Bar({ fill, dim = false, height = 4 }) {
   })
 }
 
-/**
- * How full each segment of the routine bar is: a segment per hold, with a
- * short one between holds for the rest. 0 → 1 each.
- */
-export function routineSegments(s, ex, now) {
-  const p = phaseProgress(s, ex, now)
-  const out = []
-  ex.reps.forEach((rep, i) => {
-    const hold = i < s.rep || (i === s.rep && (s.phase === 'rest' || s.phase === 'done')) ? 1 : i === s.rep && s.phase === 'hold' ? p : 0
-    out.push({ kind: 'hold', rep: i, weight: ex.holdMs, fill: hold })
-    if (i < ex.reps.length - 1) {
-      const rest = i < s.rep || s.phase === 'done' ? 1 : i === s.rep && s.phase === 'rest' ? p : 0
-      out.push({ kind: 'rest', rep: i, weight: REST_MS, fill: rest })
-    }
-  })
-  return out
-}
-
-/** The routine bar (Left · rest · Right) with side labels under the holds. */
+/** The routine bar, with round labels (Left / Right) under it if the exercise has them. */
 function RoutineBar({ s, ex, now }) {
   const segs = routineSegments(s, ex, now)
   const paused = s.pausedAt != null
-  const current = s.phase === 'rest' ? s.rep + 1 : s.rep
+  const current = currentRound(s, ex)
+  const labelled = ex.rounds.some(Boolean)
   const row = render =>
     jsx('div', {
       style: { display: 'flex', gap: 4 },
@@ -646,35 +866,36 @@ function RoutineBar({ s, ex, now }) {
     style: { display: 'grid', gap: 6, width: '100%', maxWidth: 440 },
     children: [
       row(seg => jsx(Bar, { fill: seg.fill, dim: paused })),
-      row(seg =>
-        seg.kind === 'hold'
-          ? jsx('span', {
-              style: {
-                fontSize: 12,
-                color: seg.rep === current ? 'var(--ui-text-secondary)' : 'var(--ui-text-tertiary)',
-                whiteSpace: 'nowrap'
-              },
-              children: ex.reps[seg.rep].side
-            })
-          : null
-      )
+      labelled
+        ? row(seg =>
+            seg.round != null && ex.rounds[seg.round]
+              ? jsx('span', {
+                  style: {
+                    fontSize: 12,
+                    color: seg.round === current ? 'var(--ui-text-secondary)' : 'var(--ui-text-tertiary)',
+                    whiteSpace: 'nowrap'
+                  },
+                  children: ex.rounds[seg.round]
+                })
+              : null
+          )
+        : null
     ]
   })
 }
 
-/** Offer, idle and done: one compact row (~50px), so the chat barely moves. */
-function StretchCompact({ model }) {
-  const ex = EXERCISE
-  const s = useValue(model.$routine)
+/** Offer and idle: one compact row (~50px), so the chat barely moves. */
+function StretchCompact({ model, s }) {
+  const ex = exerciseOf(s)
   const ui = useValue(model.$ui)
   const a = model.actions
   const now = Date.now()
-  const about = `${ex.reps.length} × ${ex.holdMs / 1000} s · about ${routineSeconds(ex)} s`
+  const about = `${ex.detail} · about ${routineSeconds(ex)} s`
 
   let heading, sub, bar = null, actions
   if (s.phase === 'offer') {
-    const left = Math.ceil(remainingMs(s, now) / 1000)
-    heading = 'Quick stretch while Hermes works?'
+    const left = displaySeconds(s, now)
+    heading = ex.offerHeading
     sub = `${ex.name} · ${about}`
     bar = jsxs('div', {
       style: { display: 'flex', alignItems: 'center', gap: 8, maxWidth: 320 },
@@ -687,15 +908,8 @@ function StretchCompact({ model }) {
       jsx(Button, { size: 'sm', onClick: a.skipStretch, children: 'Start now' }, 'go'),
       jsx(TextButton, { onClick: a.notNow, children: 'Not now' }, 'no')
     ]
-  } else if (s.phase === 'done') {
-    heading = 'Nice one'
-    sub = `${ex.name} done. Roll your shoulders and carry on.`
-    actions = [
-      jsx(TextButton, { onClick: a.startStretch, children: 'Again' }, 'again'),
-      jsx(TextButton, { onClick: a.hidePane, children: 'Hide' }, 'hide')
-    ]
   } else {
-    heading = ui.offered ? 'Quick stretch while Hermes works?' : ex.name
+    heading = ui.offered ? ex.offerHeading : ex.name
     sub = ui.offered ? `${ex.name} · ${about}` : `${ex.summary} ${about}.`
     actions = [
       jsx(Button, { size: 'sm', onClick: a.startStretch, children: 'Start' }, 'go'),
@@ -706,7 +920,7 @@ function StretchCompact({ model }) {
   return jsxs('div', {
     style: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px 12px' },
     children: [
-      jsx(Figure, { pose: ex.reps[0].side.toLowerCase(), size: THUMB_PX }),
+      jsx(Figure, { pose: ex.steps[0].pose, size: THUMB_PX }),
       jsxs('div', {
         style: { flex: '1 1 220px', minWidth: 0, display: 'grid', gap: 3 },
         children: [
@@ -731,25 +945,20 @@ function StretchCompact({ model }) {
   })
 }
 
-const NUMBER_CAPTION = { prep: 'get ready', hold: 'seconds left', rest: 'switch sides' }
-
-/** Get ready, hold and rest: figure(s), big countdown, routine bar, controls. */
-function StretchLarge({ model, wide }) {
-  const ex = EXERCISE
-  const s = useValue(model.$routine)
+/** While an exercise runs: figure, big countdown, routine bar, cue, controls. */
+function StretchLarge({ model, s, now, wide }) {
+  const ex = exerciseOf(s)
   const a = model.actions
-  const now = Date.now()
   const paused = s.pausedAt != null
-  const rep = ex.reps[s.rep]
-  const next = ex.reps[s.rep + 1]
-  // The side you're on (or about to switch to, during the rest).
-  const focus = s.phase === 'rest' ? s.rep + 1 : s.rep
-  const cue =
-    s.phase === 'prep'
-      ? `${ex.setup} First: ${rep.side.toLowerCase()} side.`
-      : s.phase === 'rest'
-        ? `Slowly bring your head back to centre. Next: ${next.side.toLowerCase()} side.`
-        : rep.cue
+  const step = s.phase === 'step' ? ex.steps[s.step] : null
+  const cue = step ? step.cue : ex.setup
+  // Each new step eases in: the countdown + its caption, and the cue (only
+  // when the words actually change).
+  const stepKey = `${s.phase}:${s.step}`
+  const countRef = useRef(null)
+  const cueRef = useRef(null)
+  useEnterOnChange(countRef, stepKey)
+  useEnterOnChange(cueRef, cue)
 
   const tile = jsx('div', {
     style: { flex: 'none', padding: 14, borderRadius: 'var(--radius-xl)', background: 'var(--ui-bg-tertiary)' },
@@ -763,10 +972,11 @@ function StretchLarge({ model, wide }) {
         style: { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '2px 10px' },
         children: [
           jsx('span', { style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' }, children: ex.name }),
-          jsx('span', { style: { ...S.muted, fontSize: 13 }, children: `Rep ${focus + 1} of ${ex.reps.length} · ${ex.reps[focus].side} side` })
+          jsx('span', { style: { ...S.muted, fontSize: 13 }, children: ex.roundText(currentRound(s, ex)) })
         ]
       }),
       jsxs('div', {
+        ref: countRef,
         style: { display: 'flex', alignItems: 'baseline', gap: 10 },
         children: [
           jsx('span', {
@@ -778,13 +988,13 @@ function StretchLarge({ model, wide }) {
               color: 'var(--ui-text-primary)',
               opacity: paused ? 0.45 : 1
             },
-            children: Math.ceil(remainingMs(s, now) / 1000)
+            children: displaySeconds(s, now)
           }),
-          jsx('span', { style: { ...S.muted, fontSize: 13 }, children: paused ? 'paused' : NUMBER_CAPTION[s.phase] })
+          jsx('span', { style: { ...S.muted, fontSize: 13 }, children: paused ? 'paused' : step ? step.label : 'get ready' })
         ]
       }),
       jsx(RoutineBar, { s, ex, now }),
-      jsx('div', { style: { fontSize: 14, color: 'var(--ui-text-secondary)', lineHeight: 1.45 }, children: cue }),
+      jsx('div', { ref: cueRef, style: { fontSize: 14, color: 'var(--ui-text-secondary)', lineHeight: 1.45 }, children: cue }),
       jsxs('div', {
         style: { display: 'flex', alignItems: 'center', gap: 14 },
         children: [
@@ -802,20 +1012,83 @@ function StretchLarge({ model, wide }) {
   })
 }
 
+/** A tick in a ring, in the accent colour. */
+function Tick({ size = 28 }) {
+  return jsxs('svg', {
+    'aria-hidden': 'true',
+    width: size,
+    height: size,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'var(--ui-accent)',
+    strokeWidth: 1.75,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    style: { flex: 'none' },
+    children: [jsx('circle', { cx: 12, cy: 12, r: 10.5 }), jsx('path', { d: 'M7.5 12.5l3 3 6-6.5' })]
+  })
+}
+
+/**
+ * Finished: same footprint as the exercise (no jump), a "done" figure, a tick
+ * and a well done. Leaves by itself after DONE_LINGER_MS; Close skips the wait.
+ */
+function StretchDone({ model, s, wide }) {
+  const ex = exerciseOf(s)
+  return jsxs('div', {
+    style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 24 },
+    children: [
+      jsx('div', {
+        style: { flex: 'none', padding: 14, borderRadius: 'var(--radius-xl)', background: 'var(--ui-bg-tertiary)' },
+        children: jsx(Figure, { pose: 'done', size: wide ? FIGURE_PX : FIGURE_NARROW_PX })
+      }),
+      jsxs('div', {
+        style: { flex: '1 1 260px', minWidth: 0, display: 'grid', alignContent: 'center', gap: 10 },
+        children: [
+          jsxs('div', {
+            style: { display: 'flex', alignItems: 'center', gap: 10 },
+            children: [
+              jsx(Tick, {}),
+              jsx('span', {
+                style: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ui-text-primary)' },
+                children: 'Well done, you did it'
+              })
+            ]
+          }),
+          jsx('div', { style: { fontSize: 14, color: 'var(--ui-text-secondary)', lineHeight: 1.45 }, children: ex.doneText }),
+          jsx('div', { children: jsx(TextButton, { onClick: model.actions.dismissDone, children: 'Close' }) })
+        ]
+      })
+    ]
+  })
+}
+
 /** The stretch UI, sized by phase. */
 function StretchBody({ model }) {
-  const s = useValue(model.$routine)
+  const stored = useValue(model.$routine)
+  // Draw from the clock, not just the store: the routine driver advances the
+  // store on its own 200 ms interval, so between a step ending and the driver
+  // noticing, the store still holds the finished step (which would show a
+  // "0"). Catching up here means the card always shows the step that's
+  // actually running; the driver catches the store up moments later.
+  const now = Date.now()
+  const s = tickRoutine(stored, exerciseOf(stored), now)
   const ref = useRef(null)
   const width = useWidth(ref)
-  const large = isLargePhase(s.phase)
-  useTicker(isTimed(s) && s.pausedAt == null, 200)
-  useFadeOnChange(ref, large)
+  const wide = width == null || width >= WIDE_MIN_PX
+  const layout = s.phase === 'done' ? 'done' : isLargePhase(s.phase) ? 'large' : 'compact'
+  // 100 ms keeps each second of the countdown even (≤ 0.1 s late).
+  useTicker(isTimed(s) && s.pausedAt == null, 100)
+  useFadeOnChange(ref, layout)
   return jsx('div', {
     ref,
     style: { width: '100%', fontSize: 12 },
-    children: large
-      ? jsx(StretchLarge, { model, wide: width == null || width >= WIDE_MIN_PX })
-      : jsx(StretchCompact, { model })
+    children:
+      layout === 'done'
+        ? jsx(StretchDone, { model, s, wide })
+        : layout === 'large'
+          ? jsx(StretchLarge, { model, s, now, wide })
+          : jsx(StretchCompact, { model, s })
   })
 }
 
@@ -948,6 +1221,13 @@ function SettingsPage({ model }) {
         checked: s.autoStart,
         onChange: on => set({ autoStart: on })
       }),
+      jsx(ToggleRow, {
+        label: 'Offer a breather when things get tense',
+        description:
+          'Suggest box breathing when your recent messages sound frustrated. Messages are checked on this device only; nothing is stored or sent.',
+        checked: s.breathersEnabled,
+        onChange: on => set({ breathersEnabled: on })
+      }),
       jsx(ListRow, {
         title: 'Time between breaks',
         description: 'After a stretch (or skipping one), wait this long before offering another.',
@@ -988,6 +1268,10 @@ export default {
     const $settings = atom(normalizeSettings(ctx.storage.get('settings', null)))
     /** When the last break ended (done or declined) — drives the cooldown. Persisted. */
     let lastBreakAt = ctx.storage.get('lastBreakAt', null)
+    /** Same, for breathers (their own cooldown). Persisted. */
+    let lastBreatherAt = ctx.storage.get('lastBreatherAt', null)
+    /** Debug view only: tension in the window and when a breather was armed. */
+    const $tension = atom({ total: 0, armedAt: null })
 
     // Per-session turn-busy map. Fall back to the focused flag on older
     // desktops that lack busyBySession (this fallback can't tell a session
@@ -1004,7 +1288,7 @@ export default {
     // disposed a moment after it's no longer wanted.
     //   want → mount (or cancel a pending exit)
     //   !want → [grace HIDE_DELAY_MS unless immediate] → exit anim EXIT_MS → unregister
-    const model = { $activity, $events, $bySession, $ui, $paneOpen, $closing, $routine, $settings, actions: {} }
+    const model = { $activity, $events, $bySession, $ui, $paneOpen, $closing, $routine, $settings, $tension, actions: {} }
     const paneContribution = {
       id: 'pane',
       area: 'panes',
@@ -1021,6 +1305,18 @@ export default {
     }
     const surfaceFor = placement => (placement === 'pane' ? [paneContribution] : [composerBelow])
     let mountedPlacement = null
+    /** The well-done screen's own timer, and whether it's on its way out. */
+    let cancelDone = null
+    let dismissingDone = false
+    /**
+     * The idle card after a reset. Normally the stretch. DEV: alternate
+     * through the exercises so each one gets seen without needing a trigger.
+     */
+    const freshIdle = () => {
+      if (!DEV.keepPaneOpen) return idleRoutine()
+      const all = Object.values(EXERCISES)
+      return idleRoutine(all[(all.indexOf(exerciseOf($routine.get())) + 1) % all.length])
+    }
     let disposePane = null
     let cancelGrace = null
     let cancelExit = null
@@ -1051,10 +1347,17 @@ export default {
         dispose()
         $closing.set(false)
         $paneOpen.set(false)
+        // Gone from screen: a finished (or withdrawn) exercise resets, so the
+        // next time the card opens it starts fresh.
+        if (!isTimed($routine.get()) && $routine.get().phase !== 'idle') $routine.set(freshIdle())
       }, EXIT_MS)
     }
+    /** The "well done" screen is showing and hasn't been dismissed yet. */
+    const celebrating = () => $routine.get().phase === 'done' && !dismissingDone
     const wantPane = () =>
-      DEV.keepPaneOpen || shouldShowPane({ ...$ui.get(), routineActive: isRoutineActive($routine.get()) })
+      DEV.keepPaneOpen ||
+      celebrating() ||
+      shouldShowPane({ ...$ui.get(), routineActive: isRoutineActive($routine.get()) })
     const syncPane = ({ immediate = false } = {}) => {
       if (wantPane()) return mountPane()
       if (!disposePane) return
@@ -1072,27 +1375,84 @@ export default {
     let spell = null // { startedAt, toolSeen, offered }
     /** PROTOTYPE: a ⌘K preview offer is underway — don't let it start a cooldown. */
     let previewing = false
+    /** A break of the current routine's kind ended: start that kind's cooldown. */
     const markBreak = () => {
       if (previewing) return
-      lastBreakAt = Date.now()
-      ctx.storage.set('lastBreakAt', lastBreakAt)
+      if (exerciseOf($routine.get()).kind === 'breathing') {
+        lastBreatherAt = Date.now()
+        ctx.storage.set('lastBreatherAt', lastBreatherAt)
+      } else {
+        lastBreakAt = Date.now()
+        ctx.storage.set('lastBreakAt', lastBreakAt)
+      }
+    }
+
+    // ── Tension (see tensionScore) ───────────────────────────────────────────
+    // Only { at, score } is kept, in memory, trimmed to the window. Never text.
+    let tensionLog = []
+    let armedAt = null
+    const publishTension = now => $tension.set({ total: tensionTotal(tensionLog, now), armedAt })
+    const noteMessage = text => {
+      if (!$settings.get().breathersEnabled) return
+      const now = Date.now()
+      const score = tensionScore(text)
+      tensionLog = recentTension(tensionLog, now)
+      if (score > 0) tensionLog.push({ at: now, score })
+      if (tensionUptick(tensionLog, now)) armedAt = now
+      publishTension(now)
+      maybeOffer()
+    }
+    // Composer middleware: sees each message as it's sent from Desktop, and
+    // ALWAYS returns it untouched. Never blocks, never rewrites, never stores.
+    if (COMPOSER_AREAS.middleware) {
+      ctx.register({
+        id: 'tension',
+        area: COMPOSER_AREAS.middleware,
+        data: {
+          handler: draft => {
+            try {
+              noteMessage(draft && draft.text)
+            } catch {
+              // detection must never get in the way of a send
+            }
+            return draft
+          }
+        }
+      })
+    }
+
+    /** Show an offer for `ex` (countdown, or the Start screen if auto-start is off). */
+    const presentOffer = (ex, now) => {
+      $routine.set($settings.get().autoStart ? offerRoutine(ex, now) : idleRoutine(ex))
+      patchUi({ offered: true, view: 'stretch' })
+      syncPane()
     }
     const maybeOffer = () => {
       const now = Date.now()
-      const routine = $routine.get()
-      if (!shouldOffer({ spell, settings: $settings.get(), lastBreakAt, routinePhase: routine.phase, now })) return
-      spell.offered = true
+      if (armedAt != null && now - armedAt >= BREATHER_ARM_MS) {
+        armedAt = null // Hermes never got going: let it go
+        publishTension(now)
+      }
+      const routinePhase = $routine.get().phase
+      const settings = $settings.get()
+      let ex = null
+      if (shouldOfferBreather({ spell, armedAt, settings, lastBreatherAt, routinePhase, now })) {
+        ex = BOX_BREATHING
+        armedAt = null // one rough patch → one offer
+        tensionLog = []
+        publishTension(now)
+      } else if (shouldOffer({ spell, settings, lastBreakAt, routinePhase, now })) ex = NECK_TILT
+      if (!ex) return
+      spell.offered = true // at most one offer of any kind per spell
       previewing = false // a real offer supersedes a preview
-      if ($settings.get().autoStart) $routine.set(offerRoutine(now))
-      patchUi({ offered: true })
-      syncPane()
+      presentOffer(ex, now)
     }
     const endSpell = () => {
       spell = null
       // Hermes finished before the user engaged: withdraw quietly (no cooldown)
-      // and leave straight away; a stretch already underway keeps the pane.
+      // and leave straight away; an exercise already underway keeps the card.
       const withdrawing = $ui.get().offered && !isRoutineActive($routine.get())
-      if ($routine.get().phase === 'offer') $routine.set(idleRoutine())
+      if (withdrawing) $routine.set(idleRoutine())
       if ($ui.get().offered) patchUi({ offered: false })
       syncPane({ immediate: withdrawing })
     }
@@ -1142,7 +1502,7 @@ export default {
     // (the delay can elapse between events).
     ctx.setInterval(() => {
       const s = $routine.get()
-      const next = tickRoutine(s, EXERCISE, Date.now())
+      const next = tickRoutine(s, exerciseOf(s), Date.now())
       if (next !== s) $routine.set(next)
       maybeOffer()
     }, 200)
@@ -1150,14 +1510,30 @@ export default {
     ctx.onDispose(
       $routine.listen(s => {
         if (s.phase === 'done' && prevPhase !== 'done') {
-          markBreak() // finished a stretch
+          markBreak() // finished an exercise
           previewing = false
+          // The well-done screen owns the card now: it leaves by itself even
+          // if the card was opened by hand.
+          patchUi({ pinned: false, offered: false })
+          cancelDone = stop(cancelDone)
+          cancelDone = ctx.setTimeout(dismissDone, DONE_LINGER_MS)
+        } else if (s.phase !== 'done') {
+          cancelDone = stop(cancelDone)
+          dismissingDone = false
         }
         prevPhase = s.phase
         syncPane() // start/end of a routine changes whether the pane is wanted
       })
     )
     const setRoutine = fn => $routine.set(fn($routine.get(), Date.now()))
+    /** Well-done screen over (timer or Close): leave. DEV: back to the offer card. */
+    function dismissDone() {
+      cancelDone = stop(cancelDone)
+      if ($routine.get().phase !== 'done') return
+      if (DEV.keepPaneOpen) return $routine.set(freshIdle())
+      dismissingDone = true
+      syncPane({ immediate: true }) // exit, then the routine resets to idle
+    }
 
     // ── Actions ──────────────────────────────────────────────────────────────
     const hidePane = () => {
@@ -1165,7 +1541,7 @@ export default {
       const r = $routine.get()
       if ($ui.get().offered || isTimed(r)) markBreak()
       previewing = false
-      $routine.set(idleRoutine())
+      $routine.set(freshIdle())
       patchUi({ pinned: false, offered: false })
       syncPane({ immediate: true })
     }
@@ -1193,6 +1569,7 @@ export default {
     Object.assign(model.actions, {
       hidePane,
       showPane,
+      dismissDone,
       togglePane: () => (paneShowing() ? hidePane() : showPane()),
       setView: view => patchUi({ view }),
       updateSettings,
@@ -1204,16 +1581,20 @@ export default {
         if (!$ui.get().offered && !isRoutineActive($routine.get())) showPane('stretch') // something to look at
       },
       /** PROTOTYPE: show an offer now (no agent turn needed); never starts a cooldown. */
-      previewOffer: () => {
+      previewOffer: (ex = NECK_TILT) => {
         previewing = true
-        if ($settings.get().autoStart) $routine.set(offerRoutine(Date.now()))
-        patchUi({ offered: true, view: 'stretch' })
-        syncPane()
+        presentOffer(ex, Date.now())
       },
-      startStretch: () => setRoutine((_, now) => startRoutine(EXERCISE, now)),
+      /** Start an exercise right away (⌘K). */
+      startExercise: ex => {
+        patchUi({ view: 'stretch' })
+        $routine.set(startRoutine(ex, Date.now()))
+      },
+      /** Start whichever exercise the card shows. */
+      startStretch: () => setRoutine((s, now) => startRoutine(exerciseOf(s), now)),
       pauseStretch: () => setRoutine(pauseRoutine),
       resumeStretch: () => setRoutine(resumeRoutine),
-      skipStretch: () => setRoutine((s, now) => skipRoutine(s, EXERCISE, now)),
+      skipStretch: () => setRoutine((s, now) => skipRoutine(s, exerciseOf(s), now)),
       // Stop / not now = done with it: close now (exit fade only, no grace period).
       stopStretch: hidePane,
       notNow: hidePane,
@@ -1237,7 +1618,7 @@ export default {
     const palette = (id, label, run) => ({
       id,
       area: PALETTE_AREA,
-      data: { id: `stretch-break.${id}`, label: `Stretch Break: ${label}`, keywords: ['stretch', 'break'], run }
+      data: { id: `stretch-break.${id}`, label: `Stretch Break: ${label}`, keywords: ['stretch', 'break', 'breathe', 'breathing'], run }
     })
     ctx.registerMany([
       { id: 'chip', area: STATUSBAR_AREAS.right, order: 125, render: () => jsx(StatusChip, { model }) },
@@ -1246,7 +1627,10 @@ export default {
         updateSettings({ offersEnabled: !$settings.get().offersEnabled })
       ),
       palette('placement', 'Next placement (prototype)', model.actions.nextPlacement),
-      palette('preview', 'Preview an offer (prototype)', model.actions.previewOffer),
+      palette('stretch', 'Start a stretch', () => model.actions.startExercise(NECK_TILT)),
+      palette('breathe', 'Start box breathing', () => model.actions.startExercise(BOX_BREATHING)),
+      palette('preview', 'Preview an offer (prototype)', () => model.actions.previewOffer(NECK_TILT)),
+      palette('preview-breather', 'Preview a breather offer (prototype)', () => model.actions.previewOffer(BOX_BREATHING)),
       palette('settings', 'Open settings', () => host.navigate(pluginSettingsHref(PLUGIN_ID))),
       palette('debug', 'Show debug panel', () => {
         updateSettings({ placement: 'pane' }) // the debug view lives in the pane
