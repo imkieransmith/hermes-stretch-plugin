@@ -12,6 +12,7 @@ import plugin, {
   advanceRoutine,
   anyBusy,
   applyTransitions,
+  currentPose,
   diffBusy,
   emptyActivity,
   filterLog,
@@ -242,5 +243,14 @@ test('routine bar: a segment per hold, a rest between, filled in order', () => {
   s = tickRoutine(s, EXERCISE, at)
   assert.equal(s.phase, 'done')
   assert.deepEqual(fills(s), [1, 1, 1])
+})
+
+test('figure: shows what you should be doing now', () => {
+  const HOLD = EXERCISE.holdMs
+  const pose = at => currentPose(tickRoutine(startRoutine(EXERCISE, 0), EXERCISE, at), EXERCISE)
+  assert.equal(pose(0), 'centre', 'getting ready: upright')
+  assert.equal(pose(PREP_MS + 1), 'left')
+  assert.equal(pose(PREP_MS + HOLD + 1), 'centre', 'between sides: upright')
+  assert.equal(pose(PREP_MS + HOLD + REST_MS + 1), 'right')
 })
 

@@ -77,7 +77,7 @@ export const PLACEMENTS = [
  */
 export const DEV = { keepPaneOpen: true }
 /** DEV ONLY — bump on each change so a stale hot reload is obvious in the UI. */
-const DEV_BUILD = 'b8'
+const DEV_BUILD = 'b11'
 /** Exit animation length; the pane is unregistered when it completes. */
 export const EXIT_MS = 220
 const ENTER_MS = 280
@@ -563,11 +563,20 @@ function useFadeOnChange(ref, key) {
 }
 
 /**
- * PLACEHOLDER for the exercise illustration (real assets to come).
- * `side` is the rep's side ('Left' / 'Right'). Swap this for the artwork;
- * keep it theme-driven (currentColor / --ui-* vars) for light and dark.
+ * What the figure should show right now: tilted to the side being held,
+ * upright while getting ready and between sides.
+ * @returns {'centre' | 'left' | 'right'}
  */
-function Figure({ side, size, active = true }) {
+export function currentPose(s, ex) {
+  return s.phase === 'hold' ? ex.reps[s.rep].side.toLowerCase() : 'centre'
+}
+
+/**
+ * PLACEHOLDER for the exercise illustration (real assets to come). Shows one
+ * `pose` ('centre' | 'left' | 'right'). Swap this for the artwork; keep it
+ * theme-driven (currentColor / --ui-* vars) for light and dark.
+ */
+function Figure({ pose, size }) {
   return jsx('div', {
     'aria-hidden': 'true',
     style: {
@@ -582,11 +591,9 @@ function Figure({ side, size, active = true }) {
       color: 'var(--ui-text-quaternary)',
       fontSize: size >= 80 ? 11 : 9,
       lineHeight: 1.3,
-      whiteSpace: 'pre-line',
-      opacity: active ? 1 : 0.5,
-      transition: 'opacity 200ms ease'
+      whiteSpace: 'pre-line'
     },
-    children: size >= 80 ? `figure\n${side.toLowerCase()}` : side[0]
+    children: size >= 80 ? `figure\n${pose}` : pose[0]
   })
 }
 
@@ -655,19 +662,8 @@ function RoutineBar({ s, ex, now }) {
   })
 }
 
-/** PROTOTYPE chrome: dev build label + placement switch. Remove before release. */
-function ProtoBits({ model }) {
-  return jsxs('span', {
-    style: { display: 'inline-flex', alignItems: 'center', gap: 8 },
-    children: [
-      DEV.keepPaneOpen ? jsx('span', { style: { ...S.faint, ...S.mono }, children: `dev ${DEV_BUILD}` }) : null,
-      jsx(PlacementCycle, { model })
-    ]
-  })
-}
-
 /** Offer, idle and done: one compact row (~50px), so the chat barely moves. */
-function StretchCompact({ model, chrome }) {
+function StretchCompact({ model }) {
   const ex = EXERCISE
   const s = useValue(model.$routine)
   const ui = useValue(model.$ui)
@@ -710,7 +706,7 @@ function StretchCompact({ model, chrome }) {
   return jsxs('div', {
     style: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px 12px' },
     children: [
-      jsx(Figure, { side: ex.reps[0].side, size: THUMB_PX }),
+      jsx(Figure, { pose: ex.reps[0].side.toLowerCase(), size: THUMB_PX }),
       jsxs('div', {
         style: { flex: '1 1 220px', minWidth: 0, display: 'grid', gap: 3 },
         children: [
@@ -729,7 +725,7 @@ function StretchCompact({ model, chrome }) {
       }),
       jsxs('div', {
         style: { display: 'flex', alignItems: 'center', gap: 12, flex: 'none', marginLeft: 'auto' },
-        children: [...actions, chrome ? jsx(ProtoBits, { model }, 'proto') : null]
+        children: actions
       })
     ]
   })
@@ -738,7 +734,7 @@ function StretchCompact({ model, chrome }) {
 const NUMBER_CAPTION = { prep: 'get ready', hold: 'seconds left', rest: 'switch sides' }
 
 /** Get ready, hold and rest: figure(s), big countdown, routine bar, controls. */
-function StretchLarge({ model, chrome, wide }) {
+function StretchLarge({ model, wide }) {
   const ex = EXERCISE
   const s = useValue(model.$routine)
   const a = model.actions
@@ -755,44 +751,9 @@ function StretchLarge({ model, chrome, wide }) {
         ? `Slowly bring your head back to centre. Next: ${next.side.toLowerCase()} side.`
         : rep.cue
 
-  const figure = i =>
-    jsxs(
-      'div',
-      {
-        style: { display: 'grid', justifyItems: 'center', gap: 8 },
-        children: [
-          jsx(Figure, { side: ex.reps[i].side, size: wide ? FIGURE_PX : FIGURE_NARROW_PX, active: i === focus }),
-          jsx('span', {
-            style: {
-              fontSize: 12,
-              fontWeight: i === focus ? 600 : 400,
-              color: i === focus ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)'
-            },
-            children: `${ex.reps[i].side} · rep ${i + 1}`
-          })
-        ]
-      },
-      i
-    )
   const tile = jsx('div', {
-    style: {
-      flex: 'none',
-      display: 'flex',
-      gap: 16,
-      padding: 14,
-      borderRadius: 'var(--radius-xl)',
-      background: 'var(--ui-bg-tertiary)'
-    },
-    children: wide ? ex.reps.map((_, i) => figure(i)) : [figure(focus)]
-  })
-
-  const header = jsxs('div', {
-    style: { display: 'flex', alignItems: 'center', gap: 12 },
-    children: [
-      jsx('span', { style: { ...S.muted, fontSize: 12, fontWeight: 500 }, children: 'Stretch break' }),
-      jsx('span', { style: { flex: 1 } }),
-      chrome ? jsx(ProtoBits, { model }) : null
-    ]
+    style: { flex: 'none', padding: 14, borderRadius: 'var(--radius-xl)', background: 'var(--ui-bg-tertiary)' },
+    children: jsx(Figure, { pose: currentPose(s, ex), size: wide ? FIGURE_PX : FIGURE_NARROW_PX })
   })
 
   const body = jsxs('div', {
@@ -836,16 +797,13 @@ function StretchLarge({ model, chrome, wide }) {
   })
 
   return jsxs('div', {
-    style: { display: 'grid', gap: 12 },
-    children: [header, jsxs('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 24 }, children: [tile, body] })]
+    style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 24 },
+    children: [tile, body]
   })
 }
 
-/**
- * The stretch UI, sized by phase. `chrome` adds the prototype bits (the pane
- * has its own top bar for those).
- */
-function StretchBody({ model, chrome = true }) {
+/** The stretch UI, sized by phase. */
+function StretchBody({ model }) {
   const s = useValue(model.$routine)
   const ref = useRef(null)
   const width = useWidth(ref)
@@ -856,8 +814,8 @@ function StretchBody({ model, chrome = true }) {
     ref,
     style: { width: '100%', fontSize: 12 },
     children: large
-      ? jsx(StretchLarge, { model, chrome, wide: width == null || width >= WIDE_MIN_PX })
-      : jsx(StretchCompact, { model, chrome })
+      ? jsx(StretchLarge, { model, wide: width == null || width >= WIDE_MIN_PX })
+      : jsx(StretchCompact, { model })
   })
 }
 
@@ -881,7 +839,19 @@ function ComposerCard({ model }) {
   usePaneMotion(rootRef, closing)
   return jsx('div', {
     ref: rootRef,
-    style: { width: '100%', padding: '6px 8px 4px' }, // the underside strip is a wrapping flex row
+    // The composer dock floats over the transcript, so the chat scrolls
+    // underneath this strip. Paint it like the app's own composer chrome
+    // (status stack, micro-action pills): the shared composer fill, a blur
+    // and a hairline, so text underneath never shows through.
+    style: {
+      width: '100%', // the underside strip is a wrapping flex row
+      padding: '10px 12px',
+      borderRadius: 'var(--radius-2xl)',
+      border: '1px solid color-mix(in srgb, var(--color-border, var(--ui-stroke-secondary)) 65%, transparent)',
+      background: 'var(--composer-fill, var(--ui-bg-card))',
+      backdropFilter: 'blur(0.75rem) saturate(1.12)',
+      WebkitBackdropFilter: 'blur(0.75rem) saturate(1.12)'
+    },
     children: jsx(StretchBody, { model })
   })
 }
@@ -938,7 +908,7 @@ function StretchPane({ model }) {
         ? jsx(DebugView, { model })
         : jsx('div', {
             style: { flex: 1, minHeight: 0, overflow: 'auto', display: 'grid', alignItems: 'center' },
-            children: jsx(StretchBody, { model, chrome: false })
+            children: jsx(StretchBody, { model })
           })
     ]
   })

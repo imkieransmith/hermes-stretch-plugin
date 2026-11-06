@@ -90,6 +90,10 @@ Out of scope:
 - **No hardcoded colours.** Use theme variables only: `--ui-text-*`,
   `--ui-stroke-*`, `--ui-bg-*`, `--ui-accent`, and `--ui-green/red/…` for
   status. The full list is in the app's `styles.css`. Leave pane backgrounds alone.
+  Exception: the below-input card *must* paint a background, because the
+  composer dock floats over the transcript. It uses the app's own composer
+  chrome recipe: `var(--composer-fill)`, a `blur(0.75rem)` backdrop and a
+  hairline border.
   - Prefer inline styles over Tailwind classes. Only classes the app itself
     uses are guaranteed to exist.
 - **Cleanup**
@@ -213,8 +217,10 @@ tails, and to paste back the output.
 
 1. Set **`DEV.keepPaneOpen = false`** in `desktop/plugin.js`. It's on during
    development so the pane is always visible.
-   - The `DEV_BUILD` label only shows while `keepPaneOpen` is on. Bump it
-     on every change during development so a stale hot reload is obvious.
+   - The `DEV_BUILD` label only shows while `keepPaneOpen` is on, and only
+     in the bottom pane's top bar (the below-input card has no top row).
+     Bump it on every change during development so a stale hot reload is
+     obvious.
    - Resolve the **placement prototype**: keep one placement and delete
      `PLACEMENTS`, `settings.placement`, the "Placement (prototype)"
      settings row, the ⌘K "Next placement" and "Preview an offer" commands,
