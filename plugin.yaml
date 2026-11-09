@@ -1,0 +1,17 @@
+# Hermes plugin manifest. A Desktop-only plugin: desktop/plugin.js (generated
+# from src/) is the whole of it. There is no Python half and no __init__.py,
+# which `hermes plugins validate` accepts because desktop/plugin.js sits
+# beside this file (`hermes plugins doctor` only checks a Python half, so it
+# reports the missing __init__.py as an error: expected).
+name: openchi
+version: 0.1.0
+description: Guided desk stretches and breathing breaks while your Hermes agent works.
+author: Kieran Smith
+manifest_version: 2
+license: MIT
+tags: [desktop, wellness]
+homepage: https://github.com/imkieransmith/openchi
+# SemVer floor = the Hermes we test against. Keep in sync with the catalog
+# entry (plugin-catalog/openchi.yaml in NousResearch/hermes-agent):
+# older Hermes only enforce this one.
+requires_hermes: ">=0.22.7"
